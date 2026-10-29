@@ -1,3 +1,8 @@
+//! Checks filesystem, namespace and resource restrictions with native guests.
+//!
+//! Requires architecture-matched fixtures and Linux isolation facilities.
+//! Network tests also require outbound access from the test host.
+
 #[cfg(test)]
 mod container_test {
     use assertables::*;
@@ -498,7 +503,7 @@ mod container_test {
         let output = Container::new()
             .rootfs("/")
             .unwrap()
-            .overlaymount_rw(&lowerdir, &upperdir, &workdir, "/etc")
+            .overlaymount_rw(lowerdir, &upperdir, &workdir, "/etc")
             .command("/bin/findmnt")
             .args(["-T", "/etc"])
             .output()
@@ -509,7 +514,7 @@ mod container_test {
         let output = Container::new()
             .rootfs("/")
             .unwrap()
-            .overlaymount_rw(&lowerdir, &upperdir, &workdir, "/etc")
+            .overlaymount_rw(lowerdir, &upperdir, &workdir, "/etc")
             .command("/bin/cat")
             .args(["/etc/hostname"])
             .output()
@@ -520,7 +525,7 @@ mod container_test {
         let output = Container::new()
             .rootfs("/")
             .unwrap()
-            .overlaymount_rw(&lowerdir, &upperdir, &workdir, "/etc")
+            .overlaymount_rw(lowerdir, &upperdir, &workdir, "/etc")
             .command("/bin/sh")
             .args(["-c", "echo 'myhost' > /etc/hostname"])
             .output()
