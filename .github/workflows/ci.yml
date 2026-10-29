@@ -152,7 +152,7 @@ jobs:
           mkdir -p ci-results
           { uname -a; rustc -Vv; cargo -V; } | tee ci-results/ownership-environment.log
           python3 tools/ownership_qualification.py \
-            134735b28f8b4f9a6d679089ed1ab499faebce4f \
+            21d32985b50aea8fea072a529efb8ed0029be2b9 \
             e47114f413c256e24854d3d21cc2c0c2a66367b1 \
             ci-results/ownership "$EXPECTED_ARCH" 2>&1 | tee ci-results/ownership-driver.log
       - name: Upload ownership qualification logs
