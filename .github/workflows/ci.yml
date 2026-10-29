@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Check native architecture and Landlock support
+      - name: Record native execution environment
         env:
           EXPECTED_ARCH: ${{ matrix.os == 'ubuntu-24.04-arm' && 'aarch64' || 'x86_64' }}
         run: |
@@ -89,42 +89,6 @@ jobs:
           uname -a | tee ci-results/environment.log
           git rev-parse HEAD | tee -a ci-results/environment.log
           test "$(uname -m)" = "$EXPECTED_ARCH"
-          cc -std=c11 -Wall -Wextra -Werror -x c -o "$RUNNER_TEMP/check-landlock" - <<'C'
-          /* Check the running kernel before testing filesystem and TCP enforcement.
-           * Linux UAPI headers supply syscall numbers for each native architecture.
-           * A userspace image cannot add Landlock if the kernel lacks boot-time support.
-           */
-          #define _GNU_SOURCE
-          #include <linux/landlock.h>
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <sys/syscall.h>
-          #include <unistd.h>
-
-          int main(void)
-          {
-              const long abi = syscall(SYS_landlock_create_ruleset, NULL, 0,
-                                       LANDLOCK_CREATE_RULESET_VERSION);
-
-              if (abi < 0) {
-                  perror("Landlock ABI query failed");
-                  fputs("CI requires a kernel with Landlock compiled in and enabled at boot.\n",
-                        stderr);
-                  return EXIT_FAILURE;
-              }
-
-              /* TCP bind/connect restrictions require ABI 4. */
-              if (abi < 4) {
-                  fprintf(stderr, "Landlock ABI %ld is too old; CI requires ABI 4 or newer.\n",
-                          abi);
-                  return EXIT_FAILURE;
-              }
-
-              printf("Landlock ABI %ld meets the CI requirement (>= 4).\n", abi);
-              return EXIT_SUCCESS;
-          }
-          C
-          "$RUNNER_TEMP/check-landlock" 2>&1 | tee -a ci-results/environment.log
       - name: Allow unprivileged namespace creation
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install libseccomp
@@ -136,6 +100,9 @@ jobs:
           toolchain: stable
       - name: Record toolchain
         run: '{ rustc -Vv; cargo -V; } | tee -a ci-results/environment.log'
+      - name: Check Landlock kernel support
+        run: |
+          timeout 5m cargo test --locked --features landlock -p hakoniwa --test landlock_test -- --nocapture 2>&1 | tee ci-results/landlock-kernel.log
       - name: Test library with all features
         run: |
           timeout 15m cargo test --locked --all-features --all-targets -p hakoniwa -- --nocapture 2>&1 | tee ci-results/hakoniwa.log
