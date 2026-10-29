@@ -33,8 +33,10 @@ def main() -> None:
     output = Path(destination).resolve()
     output.mkdir(parents=True, exist_ok=False)
     reaping_baseline = "58f201cc00ebdd0b6684f865264ce95c0bda13b7"
-    roots = {lane: output / lane for lane in ("baseline", "reaping-baseline", "candidate")}
-    for lane, revision in (("baseline", baseline), ("reaping-baseline", reaping_baseline), ("candidate", candidate)):
+    report_baseline = "3be907c21124c76b7bca786af2ec4b534259d924"
+    roots = {lane: output / lane for lane in ("baseline", "reaping-baseline", "report-baseline", "candidate")}
+    for lane, revision in (("baseline", baseline), ("reaping-baseline", reaping_baseline),
+                           ("report-baseline", report_baseline), ("candidate", candidate)):
         archive = subprocess.check_output(["git", "archive", revision])
         roots[lane].mkdir()
         with tarfile.open(fileobj=io.BytesIO(archive)) as source:
@@ -48,6 +50,21 @@ def main() -> None:
         target = roots["reaping-baseline"] / "hakoniwa/tests" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(roots["candidate"] / "hakoniwa/tests" / name, target)
+    with (roots["report-baseline"] / "hakoniwa/src/child/tests.rs").open("a") as regression:
+        regression.write('''
+#[test]
+fn report_reaping_before_repair() -> std::io::Result<()> {
+    let mut probe = PendingFailure::new()?;
+    probe.child.state = ChildState::Running;
+    probe.child.status_reader_noleading = true;
+    drop(probe.gate.take());
+    assert!(probe.child.wait().is_err());
+    probe.assert_reaped();
+    assert!(!matches!(probe.child.state, ChildState::Running | ChildState::SetupFailed(_)),
+        "REPORT_ERROR_LOST_KERNEL_REAPING");
+    Ok(())
+}
+''')
     source_hashes = {
         str(path.relative_to(roots["candidate"])): digest(path)
         for path in (roots["candidate"] / "hakoniwa").rglob("*.rs")
@@ -58,6 +75,7 @@ def main() -> None:
         "candidate": candidate,
         "baseline": baseline,
         "reaping_baseline": reaping_baseline,
+        "report_baseline": report_baseline,
         "qualification_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True
         ).strip(),
@@ -113,8 +131,10 @@ def main() -> None:
         save()
         if failure is None:
             completed.check_returncode()
-        elif completed.returncode != 101 or failure not in (output / f"{label}.log").read_text():
-            raise AssertionError(f"{label}: intended runtime assertion missing")
+        else:
+            text = (output / f"{label}.log").read_text()
+            if completed.returncode != 101 or failure not in text or "test result: FAILED." not in text:
+                raise AssertionError(f"{label}: intended runtime assertion missing")
 
     def tests(*arguments: str) -> list[str]:
         return ["cargo", "test", "--locked", "-p", "hakoniwa", "--all-features", *arguments]
@@ -160,6 +180,10 @@ def main() -> None:
         refused("reaping-baseline", previous, "reaping-baseline-refusal",
                 "cached pidfd acquisition failure returned from wait without reaping")
         clean("reaping-baseline")
+        run("report-baseline-negative", "report-baseline", tests(
+            "--lib", "report_reaping_before_repair", "--", "--nocapture"),
+            "REPORT_ERROR_LOST_KERNEL_REAPING")
+        clean("report-baseline")
         run("candidate-format", "candidate", ["cargo", "fmt", "--all", "--", "--check"])
         run("candidate-clippy", "candidate", [
             "cargo", "clippy", "--locked", "-p", "hakoniwa", "--all-features",
@@ -194,9 +218,19 @@ def main() -> None:
         child.write_bytes(original)
         run("candidate-restored", "candidate", tests(
             "--test", "ownership_parity_test", "--", "--test-threads=4", "--nocapture"))
-        shortcut = original.decode().replace(
-            "if let ChildState::Reaped(status) = &self.state {",
-            "if let ChildState::SetupFailed(status) | ChildState::Reaped(status) = &self.state {")
+        shortcut = original.decode()
+        anchors = [
+            ("pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {\n",
+             "            return Ok(Some(status.clone()));\n"),
+            ("pub fn wait(&mut self) -> Result<ExitStatus> {\n",
+             "            return Ok(status.clone());\n"),
+        ]
+        for anchor, returned in anchors:
+            if shortcut.count(anchor) != 1:
+                raise AssertionError("cached reaping ablation anchor is ambiguous")
+            shortcut = shortcut.replace(anchor, anchor +
+                "        if let ChildState::SetupFailed(status) = &self.state {\n" +
+                returned + "        }\n", 1)
         if shortcut == original.decode():
             raise AssertionError("reaping ablation did not alter source")
         child.write_text(shortcut)
@@ -206,6 +240,23 @@ def main() -> None:
         child.write_bytes(original)
         restored = reaping_binary("candidate", "candidate-reaping-restored-compile")
         refused("candidate", restored, "candidate-reaping-restored")
+        marker = "        let status = report?;"
+        if original.count(marker.encode()) != 1:
+            raise AssertionError("report reaping ablation anchor is ambiguous")
+        child.write_bytes(original.replace(marker.encode(),
+            b"        if report.is_err() { self.state = ChildState::Running; }\n" + marker.encode()))
+        run("candidate-report-state-ablated", "candidate", tests(
+            "--lib", "child::tests::report_errors_preserve_reaping_truth", "--", "--exact", "--nocapture"),
+            "ChildState::ReapedWithoutReport")
+        child.write_bytes(original)
+        marker = "if !matches!(self.state, ChildState::Running) {"
+        if original.count(marker.encode()) != 1:
+            raise AssertionError("numeric PID guard ablation anchor is ambiguous")
+        child.write_bytes(original.replace(marker.encode(), b"if false {"))
+        run("candidate-numeric-pid-guard-ablated", "candidate", tests(
+            "--lib", "child::tests::report_error_prevents_numeric_pid_signal", "--", "--exact", "--nocapture"),
+            "kill signaled an unrelated numeric PID")
+        child.write_bytes(original)
         run("candidate-restored-unit-tests", "candidate", tests("--lib", "--", "--nocapture"))
         for name, expected in source_hashes.items():
             if digest(roots["candidate"] / name) != expected:
