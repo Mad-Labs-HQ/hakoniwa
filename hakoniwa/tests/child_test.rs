@@ -1,3 +1,7 @@
+//! Checks wait, timeout and cancellation for native and traced child processes.
+//!
+//! Requires Linux namespaces, ptrace and the standard `/bin` utilities.
+
 #[cfg(test)]
 mod child_test {
     use std::{thread, time};
@@ -18,7 +22,7 @@ mod child_test {
 
     #[test]
     fn test_try_wait_terminated() {
-        for mut cmd in vec![command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
+        for mut cmd in [command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
             let mut child = cmd.arg("1").spawn().unwrap();
 
             let status = child.try_wait().unwrap();
@@ -33,7 +37,7 @@ mod child_test {
 
     #[test]
     fn test_try_wait_timeout() {
-        for mut cmd in vec![command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
+        for mut cmd in [command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
             let mut child = cmd.arg("4").wait_timeout(1).spawn().unwrap();
 
             let status = child.try_wait().unwrap();
@@ -51,7 +55,7 @@ mod child_test {
 
     #[test]
     fn test_try_wait_killed() {
-        for mut cmd in vec![command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
+        for mut cmd in [command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
             let mut child = cmd.arg("1").spawn().unwrap();
 
             let status = child.try_wait().unwrap();
@@ -70,7 +74,7 @@ mod child_test {
 
     #[test]
     fn test_try_wait_then_wait() {
-        for mut cmd in vec![command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
+        for mut cmd in [command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
             let mut child = cmd.arg("1").spawn().unwrap();
 
             let status = child.try_wait().unwrap();
@@ -83,7 +87,7 @@ mod child_test {
 
     #[test]
     fn test_wait_terminated() {
-        for mut cmd in vec![command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
+        for mut cmd in [command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
             let mut child = cmd.arg("1").spawn().unwrap();
 
             thread::sleep(time::Duration::from_secs(2));
@@ -94,7 +98,7 @@ mod child_test {
 
     #[test]
     fn test_wait_timeout() {
-        for mut cmd in vec![command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
+        for mut cmd in [command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
             let mut child = cmd.arg("4").wait_timeout(1).spawn().unwrap();
 
             thread::sleep(time::Duration::from_secs(2));
@@ -109,7 +113,7 @@ mod child_test {
 
     #[test]
     fn test_wait_killed() {
-        for mut cmd in vec![command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
+        for mut cmd in [command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
             let mut child = cmd.arg("1").spawn().unwrap();
 
             child.kill().unwrap();
@@ -124,7 +128,7 @@ mod child_test {
 
     #[test]
     fn test_wait_then_wait() {
-        for mut cmd in vec![command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
+        for mut cmd in [command("/bin/sleep"), command_as_tracee("/bin/sleep")] {
             let mut child = cmd.arg("1").spawn().unwrap();
 
             let status = child.wait().unwrap();
