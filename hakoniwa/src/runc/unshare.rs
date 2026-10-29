@@ -271,8 +271,8 @@ fn apply_fs_operations(container: &Container) -> Result<()> {
 //
 // [moby#getUnprivilegedMountFlags]: https://github.com/moby/moby/blob/94d3ad69cc598b5a8eb8a643d6999375953512e8/daemon/oci_linux.go#L435
 fn unprivileged_mount_flags(path: &str, mut flags: MsFlags) -> Result<MsFlags> {
+    // Preserve a requested read-only bind while inheriting locked source flags.
     for flag in [
-        MsFlags::MS_RDONLY,
         MsFlags::MS_NOSUID,
         MsFlags::MS_NODEV,
         MsFlags::MS_NOEXEC,
