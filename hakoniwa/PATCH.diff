@@ -62,13 +62,183 @@ index 206fa1a..cb91836 100644
  pub struct Resources {
      cpu: Option<Cpu>,
      memory: Option<Memory>,
+diff --git a/src/child/tests.rs b/src/child/tests.rs
+new file mode 100644
+index 0000000..e04ba97
+--- /dev/null
++++ b/src/child/tests.rs
+@@ -0,0 +1,164 @@
++//! Modification notice: Mad Labs, Inc added this file on 2026-10-29.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Checks pending setup reports against a supervisor held behind an input gate.
++//!
++//! Requires native Linux pidfds and /bin/cat. The test owns each child
++//! exclusively and cleans it up even when an assertion fails.
++
++use super::{Child, ChildState, ExitStatus};
++use crate::startup;
++use nix::sys::wait::waitpid;
++use nix::unistd::Pid;
++use std::io::{self, PipeWriter};
++use std::os::fd::{AsFd, AsRawFd, OwnedFd};
++use std::process::{Command, Stdio};
++
++struct PendingFailure {
++    child: Child,
++    supervisor: OwnedFd,
++    gate: Option<PipeWriter>,
++    workload: Option<std::process::Child>,
++}
++
++impl PendingFailure {
++    /// Holds the supervisor alive so a cached report cannot race its exit.
++    fn new() -> io::Result<Self> {
++        let (input, gate) = std::io::pipe()?;
++        let (status_reader, status_writer) = std::io::pipe()?;
++        drop(status_writer);
++        let mut supervisor = Command::new("/bin/cat")
++            .stdin(Stdio::from(input))
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .spawn()?;
++        let identity = (|| {
++            let pid = i32::try_from(supervisor.id()).map_err(io::Error::other)?;
++            startup::acquire(pid).map(|descriptor| (Pid::from_raw(pid), descriptor))
++        })()
++        .inspect_err(|_| {
++            let _ = supervisor.kill();
++            let _ = supervisor.wait();
++        })?;
++        let child = Child::new(
++            identity.0,
++            None,
++            None,
++            None,
++            None,
++            status_reader,
++            false,
++            Some(ExitStatus::new_failure("original startup failure")),
++            None,
++            #[cfg(feature = "cgroups")]
++            None,
++            #[cfg(feature = "rustslirp")]
++            None,
++        );
++
++        // The library Child now owns the supervisor's kernel wait.
++        drop(supervisor);
++        Ok(Self {
++            child,
++            supervisor: identity.1,
++            gate: Some(gate),
++            workload: None,
++        })
++    }
++
++    /// Supplies real workload authority to model failure after acquisition.
++    fn acquire_workload(&mut self) -> io::Result<()> {
++        let mut workload = Command::new("/bin/sleep").arg("60").spawn()?;
++        let descriptor = (|| {
++            let pid = i32::try_from(workload.id()).map_err(io::Error::other)?;
++            startup::acquire(pid)
++        })()
++        .inspect_err(|_| {
++            let _ = workload.kill();
++            let _ = workload.wait();
++        })?;
++        self.child.inner_pidfd = Some(descriptor);
++        self.workload = Some(workload);
++        Ok(())
++    }
++
++    /// Confirms that the public wait consumed the supervisor's kernel status.
++    fn assert_reaped(&self) {
++        assert!(matches!(
++            waitpid(self.child.pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)),
++            Err(nix::errno::Errno::ECHILD)
++        ));
++    }
++}
++
++impl Drop for PendingFailure {
++    fn drop(&mut self) {
++        drop(self.gate.take());
++        if !matches!(self.child.state, ChildState::Reaped(_)) {
++            let _ = startup::stop(self.supervisor.as_fd());
++            while let Err(nix::errno::Errno::EINTR) = waitpid(self.child.pid, None) {}
++        }
++        if let Some(workload) = &mut self.workload {
++            let _ = workload.kill();
++            let _ = workload.wait();
++        }
++    }
++}
++
++/// Polling must not turn an unobserved setup error into completed cleanup.
++#[test]
++fn pending_setup_poll_waits_for_supervisor_exit() -> io::Result<()> {
++    let mut probe = PendingFailure::new()?;
++    assert!(probe.child.startup_cleanup_pending());
++    assert!(
++        probe.child.try_wait().map_err(io::Error::other)?.is_none(),
++        "setup failure reported before supervisor exit"
++    );
++    assert!(probe.child.startup_cleanup_pending());
++    drop(probe.gate.take());
++    let status = probe.child.wait().map_err(io::Error::other)?;
++    assert_eq!(
++        (status.code, status.reason.as_str()),
++        (125, "original startup failure")
++    );
++    probe.assert_reaped();
++    assert!(!probe.child.startup_cleanup_pending());
++    assert_eq!(
++        probe.child.wait().map_err(io::Error::other)?.reason,
++        status.reason
++    );
++    assert!(probe.child.try_wait().map_err(io::Error::other)?.is_some());
++    Ok(())
++}
++
++/// Reaping a failed supervisor must retain the acquired workload identity.
++#[test]
++fn failed_response_preserves_workload_authority_after_wait() -> io::Result<()> {
++    let mut probe = PendingFailure::new()?;
++    probe.acquire_workload()?;
++    let descriptor = probe
++        .child
++        .inner_pidfd()
++        .ok_or_else(|| io::Error::other("missing pidfd"))?
++        .as_raw_fd();
++    assert!(
++        probe.child.try_wait().map_err(io::Error::other)?.is_none(),
++        "setup failure reported before supervisor exit"
++    );
++    drop(probe.gate.take());
++    let status = probe.child.wait().map_err(io::Error::other)?;
++    assert_eq!(status.reason, "original startup failure");
++    probe.assert_reaped();
++    assert_eq!(
++        probe.child.inner_pidfd().map(|fd| fd.as_raw_fd()),
++        Some(descriptor)
++    );
++    probe.child.kill().map_err(io::Error::other)?;
++    let workload = probe
++        .workload
++        .as_mut()
++        .ok_or_else(|| io::Error::other("missing workload"))?;
++    assert!(!workload.wait()?.success());
++    assert!(!probe.child.startup_cleanup_pending());
++    Ok(())
++}
 diff --git a/src/child.rs b/src/child.rs
-index 0aec6be..636935f 100644
+index 0aec6be..23db4a6 100644
 --- a/src/child.rs
 +++ b/src/child.rs
 @@ -1,18 +1,41 @@
 +//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
-+//! 2026-10-06.
++//! 2026-10-29.
 +//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 +//!
 +//! Owns the supervisor status and pinned inner process cancellation handle.
@@ -132,12 +302,28 @@ index 0aec6be..636935f 100644
                  code: 128 + signal as i32,
                  reason: format!("process({program}) received signal {signal}"),
                  exit_code: None,
-@@ -128,10 +154,11 @@ impl fmt::Debug for Output {
+@@ -119,6 +145,14 @@ impl fmt::Debug for Output {
+     }
+ }
+ 
++/// Separates a setup report from a supervisor result observed by a kernel wait.
++#[derive(Debug)]
++enum ChildState {
++    Running,
++    SetupFailed(ExitStatus),
++    Reaped(ExitStatus),
++}
++
+ /// Representation of a running or exited child process.
+ ///
+ /// A child process is created via the [Command::spawn]. This struct is similar
+@@ -128,10 +162,11 @@ impl fmt::Debug for Output {
  /// [std::process::Child]: https://doc.rust-lang.org/std/process/struct.Child.html
  pub struct Child {
      pid: Pid,
+-    status: Option<ExitStatus>,
 +    inner_pidfd: Option<OwnedFd>,
-     status: Option<ExitStatus>,
++    state: ChildState,
      status_reader: Option<PipeReader>,
      status_reader_noleading: bool,
 -    tmpdir: Option<TempDir>,
@@ -145,7 +331,7 @@ index 0aec6be..636935f 100644
  
      /// Only initialized when using [Stdio::piped()](crate::Stdio::piped()).
      pub stdin: Option<PipeWriter>,
-@@ -156,6 +183,7 @@ impl Child {
+@@ -156,6 +191,7 @@ impl Child {
      #[allow(clippy::too_many_arguments)]
      pub(crate) fn new(
          pid: Pid,
@@ -153,7 +339,7 @@ index 0aec6be..636935f 100644
          stdin: Option<PipeWriter>,
          stdout: Option<PipeReader>,
          stderr: Option<PipeReader>,
-@@ -168,13 +196,14 @@ impl Child {
+@@ -168,13 +204,14 @@ impl Child {
      ) -> Self {
          Self {
              pid,
@@ -163,13 +349,14 @@ index 0aec6be..636935f 100644
              stderr,
              status_reader: Some(status_reader),
              status_reader_noleading,
-             status,
+-            status,
 -            tmpdir,
++            state: status.map_or(ChildState::Running, ChildState::SetupFailed),
 +            _tmpdir: tmpdir,
              #[cfg(feature = "cgroups")]
              cgroup,
              #[cfg(feature = "rustslirp")]
-@@ -187,8 +216,31 @@ impl Child {
+@@ -187,12 +224,37 @@ impl Child {
          self.pid.as_raw() as u32
      }
  
@@ -184,10 +371,12 @@ index 0aec6be..636935f 100644
 +
 +    /// Report rejected setup whose supervisor still owns gated-child cleanup.
 +    ///
-+    /// This observation is for admission before any wait. A consumed FIN proves
-+    /// dependency cleanup finished; a cached host setup error does not.
++    /// A cached setup report does not prove supervisor exit. This hint remains
++    /// true for rejected acquisition until a kernel wait reaps the supervisor.
 +    pub fn startup_cleanup_pending(&self) -> bool {
-+        self.inner_pidfd.is_none() && self.status.is_some() && !self.status_reader_noleading
++        self.inner_pidfd.is_none()
++            && matches!(self.state, ChildState::SetupFailed(_))
++            && !self.status_reader_noleading
 +    }
 +
      /// Forces the child process to exit.
@@ -201,14 +390,229 @@ index 0aec6be..636935f 100644
          // If we've already waited on this process then the pid can be recycled
          // and used for another process, and we probably shouldn't be killing
          // random processes, so return Ok because the process has exited already.
-@@ -257,7 +309,6 @@ impl Child {
+-        if self.status.is_some() {
++        if !matches!(self.state, ChildState::Running) {
+             return Ok(());
          }
  
-         self.logging();
+@@ -213,12 +275,12 @@ impl Child {
+     ///
+     /// Note that unlike wait, this function will not attempt to drop stdin.
+     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+-        if let Some(status) = &self.status {
++        if let ChildState::Reaped(status) = &self.state {
+             return Ok(Some(status.clone()));
+         }
+ 
+         let flags = Some(WaitPidFlag::WNOHANG);
+-        let ws = wait::waitpid(self.pid, flags).map_err(ProcessErrorKind::NixError)?;
++        let ws = self.wait_supervisor(flags)?;
+         if let WaitStatus::StillAlive = ws {
+             Ok(None)
+         } else {
+@@ -236,108 +298,121 @@ impl Child {
+     pub fn wait(&mut self) -> Result<ExitStatus> {
+         drop(self.stdin.take());
+ 
+-        if let Some(status) = &self.status {
++        if let ChildState::Reaped(status) = &self.state {
+             return Ok(status.clone());
+         }
+ 
+         let flags = None;
+-        let ws = wait::waitpid(self.pid, flags).map_err(ProcessErrorKind::NixError)?;
++        let ws = self.wait_supervisor(flags)?;
+         self.retrieve_exit_status(ws)
+     }
+ 
+-    /// Retrieve exit status.
++    /// Retries interrupted kernel waits without discarding the pending setup
++    /// report or its acquired workload descriptor.
++    fn wait_supervisor(&self, flags: Option<WaitPidFlag>) -> Result<WaitStatus> {
++        loop {
++            match wait::waitpid(self.pid, flags) {
++                Err(nix::errno::Errno::EINTR) => continue,
++                result => {
++                    return result
++                        .map_err(ProcessErrorKind::NixError)
++                        .map_err(Into::into);
++                }
++            }
++        }
++    }
++
++    /// Retains the original setup report while recording that the supervisor
++    /// was reaped. Workload status is decoded only for admitted startup.
+     fn retrieve_exit_status(&mut self, ws: WaitStatus) -> Result<ExitStatus> {
+-        if let WaitStatus::Signaled(_, Signal::SIGKILL, _) = ws {
+-            let reason = "container received signal SIGKILL";
+-            self.status = Some(ExitStatus::new_failure(reason));
+-        }
++        let status = match &self.state {
++            ChildState::SetupFailed(status) | ChildState::Reaped(status) => status.clone(),
++            ChildState::Running => match ws {
++                WaitStatus::Signaled(_, Signal::SIGKILL, _) => {
++                    ExitStatus::new_failure("container received signal SIGKILL")
++                }
++                _ => self.retrieve_exit_status_internal_process()?,
++            },
++        };
+ 
+-        if self.status.is_none() {
+-            self.retrieve_exit_status_internal_process()?;
+-        }
+-
+-        self.logging();
 -        drop(self.tmpdir.take());
++        self.state = ChildState::Reaped(status.clone());
++        drop(self.status_reader.take());
++        Self::logging(&status);
  
          #[cfg(feature = "cgroups")]
          drop(self.cgroup.take());
+ 
+-        let s = self.status.clone();
+-        s.ok_or(Error::ProcessError(ProcessErrorKind::ChildExitStatusGone))
++        Ok(status)
+     }
+ 
+-    /// Retrieve the exit status of the internal process from a pipe whose
+-    /// write end has been closed.
+-    fn retrieve_exit_status_internal_process(&mut self) -> Result<()> {
+-        if let Some(mut reader) = self.status_reader.take() {
+-            if !self.status_reader_noleading {
+-                let mut request = [0];
+-                reader
+-                    .read_exact(&mut request)
+-                    .map_err(ProcessErrorKind::StdIoError)?;
+-            }
++    /// Decodes the supervisor's final report after its kernel wait completed.
++    /// The leading FIN may already have been consumed during failed admission.
++    fn retrieve_exit_status_internal_process(&mut self) -> Result<ExitStatus> {
++        let mut reader = self
++            .status_reader
++            .take()
++            .ok_or(Error::ProcessError(ProcessErrorKind::ChildExitStatusGone))?;
+ 
+-            let mut encoded = vec![];
++        if !self.status_reader_noleading {
++            let mut request = [0];
+             reader
+-                .read_to_end(&mut encoded)
++                .read_exact(&mut request)
+                 .map_err(ProcessErrorKind::StdIoError)?;
+-            drop(reader);
+-
+-            let status =
+-                postcard::from_bytes(&encoded[..]).map_err(ProcessErrorKind::PostcardError)?;
+-            self.status = Some(status);
+         }
+-        Ok(())
++
++        let mut encoded = vec![];
++        reader
++            .read_to_end(&mut encoded)
++            .map_err(ProcessErrorKind::StdIoError)?;
++
++        postcard::from_bytes(&encoded)
++            .map_err(ProcessErrorKind::PostcardError)
++            .map_err(Into::into)
+     }
+ 
+-    /// Logging.
+-    fn logging(&self) {
++    /// Emits the completed report and metrics without inferring process state.
++    fn logging(status: &ExitStatus) {
+         if !log::log_enabled!(log::Level::Debug) {
+             return;
+         }
+ 
+-        if let Some(status) = &self.status {
+-            log::debug!("================================");
+-            log::debug!("Exited: {}", status.reason);
++        log::debug!("================================");
++        log::debug!("Exited: {}", status.reason);
+ 
+-            if let Some(r) = &status.rusage {
+-                let (rt, ut, st) = (r.real_time, r.user_time, r.system_time);
+-                log::debug!("Metric:      RealTime: {:>12} sec", rt.as_secs_f64());
+-                log::debug!("Metric:      UserTime: {:>12} sec", ut.as_secs_f64());
+-                log::debug!("Metric:       SysTime: {:>12} sec", st.as_secs_f64());
+-            }
++        if let Some(r) = &status.rusage {
++            let (rt, ut, st) = (r.real_time, r.user_time, r.system_time);
++            log::debug!("Metric:      RealTime: {:>12} sec", rt.as_secs_f64());
++            log::debug!("Metric:      UserTime: {:>12} sec", ut.as_secs_f64());
++            log::debug!("Metric:       SysTime: {:>12} sec", st.as_secs_f64());
++        }
+ 
+-            if let Some(r) = &status.proc_pid_smaps_rollup {
+-                log::debug!("Metric:           Rss: {:>12} kB", r.rss);
+-                log::debug!("Metric:  Shared_Dirty: {:>12} kB", r.shared_dirty);
+-                log::debug!("Metric:  Shared_Clean: {:>12} kB", r.shared_clean);
+-                log::debug!("Metric: Private_Dirty: {:>12} kB", r.private_dirty);
+-                log::debug!("Metric: Private_Clean: {:>12} kB", r.private_clean);
+-                log::debug!("Metric:           Pss: {:>12} kB", r.pss);
+-                log::debug!("Metric:     Pss_Dirty: {:>12} kB", r.pss_dirty);
+-                log::debug!("Metric:      Pss_Anon: {:>12} kB", r.pss_anon);
+-                log::debug!("Metric:      Pss_File: {:>12} kB", r.pss_file);
+-                log::debug!("Metric:     Pss_Shmem: {:>12} kB", r.pss_shmem);
+-            }
++        if let Some(r) = &status.proc_pid_smaps_rollup {
++            log::debug!("Metric:           Rss: {:>12} kB", r.rss);
++            log::debug!("Metric:  Shared_Dirty: {:>12} kB", r.shared_dirty);
++            log::debug!("Metric:  Shared_Clean: {:>12} kB", r.shared_clean);
++            log::debug!("Metric: Private_Dirty: {:>12} kB", r.private_dirty);
++            log::debug!("Metric: Private_Clean: {:>12} kB", r.private_clean);
++            log::debug!("Metric:           Pss: {:>12} kB", r.pss);
++            log::debug!("Metric:     Pss_Dirty: {:>12} kB", r.pss_dirty);
++            log::debug!("Metric:      Pss_Anon: {:>12} kB", r.pss_anon);
++            log::debug!("Metric:      Pss_File: {:>12} kB", r.pss_file);
++            log::debug!("Metric:     Pss_Shmem: {:>12} kB", r.pss_shmem);
++        }
+ 
+-            if let Some(r) = &status.proc_pid_status {
+-                log::debug!("Metric:        VmPeak: {:>12} kB", r.vmpeak);
+-                log::debug!("Metric:        VmSize: {:>12} kB", r.vmsize);
+-                log::debug!("Metric:         VmHWM: {:>12} kB", r.vmhwm);
+-                log::debug!("Metric:         VmRSS: {:>12} kB", r.vmrss);
+-                log::debug!("Metric:        VmData: {:>12} kB", r.vmdata);
+-                log::debug!("Metric:         VmStk: {:>12} kB", r.vmstk);
+-                log::debug!("Metric:         VmExe: {:>12} kB", r.vmexe);
+-                log::debug!("Metric:         VmLib: {:>12} kB", r.vmlib);
+-                log::debug!("Metric:         VmPTE: {:>12} kB", r.vmpte);
+-                log::debug!("Metric:        VmSwap: {:>12} kB", r.vmswap);
+-                log::debug!("Metric:       RssAnon: {:>12} kB", r.rssanon);
+-                log::debug!("Metric:       RssFile: {:>12} kB", r.rssfile);
+-                log::debug!("Metric:      RssShmem: {:>12} kB", r.rssshmem);
+-            }
+-        } else {
+-            log::debug!("================================");
+-            log::debug!("Exited: NULL");
++        if let Some(r) = &status.proc_pid_status {
++            log::debug!("Metric:        VmPeak: {:>12} kB", r.vmpeak);
++            log::debug!("Metric:        VmSize: {:>12} kB", r.vmsize);
++            log::debug!("Metric:         VmHWM: {:>12} kB", r.vmhwm);
++            log::debug!("Metric:         VmRSS: {:>12} kB", r.vmrss);
++            log::debug!("Metric:        VmData: {:>12} kB", r.vmdata);
++            log::debug!("Metric:         VmStk: {:>12} kB", r.vmstk);
++            log::debug!("Metric:         VmExe: {:>12} kB", r.vmexe);
++            log::debug!("Metric:         VmLib: {:>12} kB", r.vmlib);
++            log::debug!("Metric:         VmPTE: {:>12} kB", r.vmpte);
++            log::debug!("Metric:        VmSwap: {:>12} kB", r.vmswap);
++            log::debug!("Metric:       RssAnon: {:>12} kB", r.rssanon);
++            log::debug!("Metric:       RssFile: {:>12} kB", r.rssfile);
++            log::debug!("Metric:      RssShmem: {:>12} kB", r.rssshmem);
+         }
+     }
+ 
+@@ -408,3 +483,6 @@ impl Child {
+         Ok(())
+     }
+ }
++
++#[cfg(test)]
++mod tests;
 diff --git a/src/command.rs b/src/command.rs
 index 2256594..df8b74b 100644
 --- a/src/command.rs
@@ -745,6 +1149,45 @@ index 144a58e..2599ed3 100644
  pub enum Rlimit {
      As,
      Core,
+diff --git a/src/runc/landlock.rs b/src/runc/landlock.rs
+index d54d9a6..f156ddb 100644
+--- a/src/runc/landlock.rs
++++ b/src/runc/landlock.rs
+@@ -1,3 +1,11 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-06.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Applies the configured Landlock rules before inner process execution.
++//!
++//! Assumes filesystem rules name accessible paths and the kernel supports them.
++
+ use landlock::{
+     ABI as LandlockABI, Access as LandlockAccess, AccessFs as LandlockAccessFs,
+     AccessNet as LandlockAccessNet, BitFlags as LandlockBitFlags,
+diff --git a/src/runc/unshare.rs b/src/runc/unshare.rs
+index 132ae27..8133af2 100644
+--- a/src/runc/unshare.rs
++++ b/src/runc/unshare.rs
+@@ -1,3 +1,7 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-06.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
+ use super::error::*;
+ use super::sys::{self, FsFlags, MsFlags, PathBuf};
+ use crate::{
+@@ -271,8 +275,9 @@ fn apply_fs_operations(container: &Container) -> Result<()> {
+ //
+ // [moby#getUnprivilegedMountFlags]: https://github.com/moby/moby/blob/94d3ad69cc598b5a8eb8a643d6999375953512e8/daemon/oci_linux.go#L435
+ fn unprivileged_mount_flags(path: &str, mut flags: MsFlags) -> Result<MsFlags> {
++    // A caller may strengthen a writable source to read-only. Preserve that
++    // request while inheriting flags locked by the source mount.
+     for flag in [
+-        MsFlags::MS_RDONLY,
+         MsFlags::MS_NOSUID,
+         MsFlags::MS_NODEV,
+         MsFlags::MS_NOEXEC,
 diff --git a/src/runc.rs b/src/runc.rs
 index 67c2f63..75f3d80 100644
 --- a/src/runc.rs
@@ -922,45 +1365,6 @@ index 67c2f63..75f3d80 100644
  
      // Die with parent.
      sys::set_pdeathsig(Signal::SIGKILL)?;
-diff --git a/src/runc/landlock.rs b/src/runc/landlock.rs
-index d54d9a6..f156ddb 100644
---- a/src/runc/landlock.rs
-+++ b/src/runc/landlock.rs
-@@ -1,3 +1,11 @@
-+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
-+//! 2026-10-06.
-+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
-+//!
-+//! Applies the configured Landlock rules before inner process execution.
-+//!
-+//! Assumes filesystem rules name accessible paths and the kernel supports them.
-+
- use landlock::{
-     ABI as LandlockABI, Access as LandlockAccess, AccessFs as LandlockAccessFs,
-     AccessNet as LandlockAccessNet, BitFlags as LandlockBitFlags,
-diff --git a/src/runc/unshare.rs b/src/runc/unshare.rs
-index 132ae27..8133af2 100644
---- a/src/runc/unshare.rs
-+++ b/src/runc/unshare.rs
-@@ -1,3 +1,7 @@
-+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
-+//! 2026-10-06.
-+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
-+//!
- use super::error::*;
- use super::sys::{self, FsFlags, MsFlags, PathBuf};
- use crate::{
-@@ -271,8 +275,9 @@ fn apply_fs_operations(container: &Container) -> Result<()> {
- //
- // [moby#getUnprivilegedMountFlags]: https://github.com/moby/moby/blob/94d3ad69cc598b5a8eb8a643d6999375953512e8/daemon/oci_linux.go#L435
- fn unprivileged_mount_flags(path: &str, mut flags: MsFlags) -> Result<MsFlags> {
-+    // A caller may strengthen a writable source to read-only. Preserve that
-+    // request while inheriting flags locked by the source mount.
-     for flag in [
--        MsFlags::MS_RDONLY,
-         MsFlags::MS_NOSUID,
-         MsFlags::MS_NODEV,
-         MsFlags::MS_NOEXEC,
 diff --git a/src/runctl.rs b/src/runctl.rs
 index 7e2c351..58e0d1b 100644
 --- a/src/runctl.rs
@@ -1062,12 +1466,121 @@ index d6353e8..607cd85 100644
  pub struct Rule {
      pub action: Action,
      pub sysname: String,
+diff --git a/src/startup/tests.rs b/src/startup/tests.rs
+new file mode 100644
+index 0000000..796860b
+--- /dev/null
++++ b/src/startup/tests.rs
+@@ -0,0 +1,103 @@
++//! Modification notice: Mad Labs, Inc added this file on 2026-10-29.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Checks that failed startup responses retain a real acquired pidfd.
++//!
++//! Requires native Linux pidfds and /bin/sleep. The test guard reaps each
++//! workload after the protocol's stop request, even when an assertion fails.
++
++use std::io::{self, Cursor, Write};
++use std::os::fd::{AsFd, AsRawFd};
++
++use crate::startup;
++
++struct Workload(std::process::Child);
++
++impl Workload {
++    fn start() -> io::Result<Self> {
++        std::process::Command::new("/bin/sleep")
++            .arg("60")
++            .spawn()
++            .map(Self)
++    }
++
++    fn encoded(&self, response: &[u8]) -> io::Result<Cursor<Vec<u8>>> {
++        let pid = i32::try_from(self.0.id()).map_err(io::Error::other)?;
++        Ok(Cursor::new(
++            [pid.to_le_bytes().as_slice(), response].concat(),
++        ))
++    }
++}
++
++impl Drop for Workload {
++    fn drop(&mut self) {
++        let _ = self.0.kill();
++        let _ = self.0.wait();
++    }
++}
++
++struct RefusedWriter;
++
++impl Write for RefusedWriter {
++    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
++        Err(io::Error::new(
++            io::ErrorKind::BrokenPipe,
++            "injected closed host control",
++        ))
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++
++/// Requires the acquired identity to survive an acknowledgment write failure.
++#[test]
++fn acknowledgment_failure_retains_descriptor() -> io::Result<()> {
++    let mut workload = Workload::start()?;
++    let mut input = workload.encoded(&[])?;
++    let result = startup::accept(&mut input, &mut RefusedWriter)?;
++    let startup::Setup::Failed { descriptor, error } = result else {
++        return Err(io::Error::other("acquired authority was not returned"));
++    };
++
++    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
++    assert!(descriptor.as_fd().as_raw_fd() >= 0);
++    assert!(!workload.0.wait()?.success());
++    Ok(())
++}
++
++/// Requires the acquired identity to survive EOF after acknowledgment.
++#[test]
++fn response_eof_retains_descriptor() -> io::Result<()> {
++    let mut workload = Workload::start()?;
++    let mut input = workload.encoded(&[])?;
++    let mut acknowledgment = Vec::new();
++    let result = startup::accept(&mut input, &mut acknowledgment)?;
++    let startup::Setup::Failed { descriptor, error } = result else {
++        return Err(io::Error::other("acquired authority was not returned"));
++    };
++
++    assert_eq!(acknowledgment, [1]);
++    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
++    assert!(descriptor.as_fd().as_raw_fd() >= 0);
++    assert!(!workload.0.wait()?.success());
++    Ok(())
++}
++
++/// Rejects an invalid final byte without losing ownership of the pinned child.
++#[test]
++fn rejected_final_byte_retains_descriptor() -> io::Result<()> {
++    let mut workload = Workload::start()?;
++    let mut input = workload.encoded(&[0])?;
++    let mut acknowledgment = Vec::new();
++    let result = startup::accept(&mut input, &mut acknowledgment)?;
++    let startup::Setup::Failed { descriptor, error } = result else {
++        return Err(io::Error::other("acquired authority was not returned"));
++    };
++
++    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++    assert!(descriptor.as_fd().as_raw_fd() >= 0);
++    assert!(!workload.0.wait()?.success());
++    Ok(())
++}
 diff --git a/src/startup.rs b/src/startup.rs
 new file mode 100644
-index 0000000..93df7b8
+index 0000000..0e1dd38
 --- /dev/null
 +++ b/src/startup.rs
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,107 @@
 +//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
 +//! 2026-10-06.
 +//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
@@ -1172,6 +1685,9 @@ index 0000000..93df7b8
 +        }
 +    }
 +}
++
++#[cfg(test)]
++mod tests;
 diff --git a/src/supervisor.rs b/src/supervisor.rs
 new file mode 100644
 index 0000000..80079af
@@ -1512,22 +2028,6 @@ index 532bfbd..5ccf16a 100644
  pub enum Namespace {
      Cgroup,
      Ipc,
-diff --git a/src/unshare/newnet.rs b/src/unshare/newnet.rs
-index 3bfe315..5b7715d 100644
---- a/src/unshare/newnet.rs
-+++ b/src/unshare/newnet.rs
-@@ -1,3 +1,11 @@
-+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
-+//! 2026-10-06.
-+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
-+//!
-+//! Sets up the configured network through the host namespace owner.
-+//!
-+//! Assumes the selected network adapter is present and its child is unreaped.
-+
- mod network;
- mod pasta;
- 
 diff --git a/src/unshare/newnet/network.rs b/src/unshare/newnet/network.rs
 index bd92463..242a1d7 100644
 --- a/src/unshare/newnet/network.rs
@@ -1599,6 +2099,22 @@ index 397bf53..51e969f 100644
  pub struct RustSlirp {
      mode: RustSlirpMode,
      address: Ipv4Addr,
+diff --git a/src/unshare/newnet.rs b/src/unshare/newnet.rs
+index 3bfe315..5b7715d 100644
+--- a/src/unshare/newnet.rs
++++ b/src/unshare/newnet.rs
+@@ -1,3 +1,11 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-06.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Sets up the configured network through the host namespace owner.
++//!
++//! Assumes the selected network adapter is present and its child is unreaped.
++
+ mod network;
+ mod pasta;
+ 
 diff --git a/src/unshare/newns/fs.rs b/src/unshare/newns/fs.rs
 index 9f11ef0..d35999f 100644
 --- a/src/unshare/newns/fs.rs

@@ -86,3 +86,18 @@ python -m unittest discover -s tools/tests -v
 Reports, ledgers, archived crates, historical drivers and exact test receipts
 belong in `docs/local/`. They are not inputs to the basic provenance check.
 Frozen evidence retains the paths and commands used at execution time.
+
+## Failed-startup cleanup
+
+On native Linux, qualify the library and matched image helper together:
+
+```sh
+python3 tools/qualify_startup_cleanup.py --package mad-hakoniwa \
+  --features all --arch x86_64 --out /path/to/new-results
+```
+
+Use `aarch64` for a native ARM64 runner. This requires unprivileged namespaces,
+libseccomp and a Rust toolchain with Clippy and rustfmt. It checks both
+supervisor modes, refused pidfd acquisition, truthful polling and retained
+workload authority. The syscall refusal runs in disposable child commands.
+The runner cleans its Cargo target and preserves logs. It does not publish.

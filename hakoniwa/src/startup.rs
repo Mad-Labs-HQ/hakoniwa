@@ -102,3 +102,6 @@ pub(crate) fn stop(descriptor: BorrowedFd<'_>) -> io::Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

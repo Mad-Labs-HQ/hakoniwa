@@ -117,3 +117,46 @@ jobs:
           path: ci-results/
           retention-days: 7
           if-no-files-found: warn
+
+  startup-cleanup:
+    name: Startup cleanup (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    needs: [check, lints]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Prepare native isolation tests
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libseccomp-dev
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+      - name: Test fork and image startup cleanup
+        env:
+          EXPECTED_ARCH: ${{ matrix.os == 'ubuntu-24.04-arm' && 'aarch64' || 'x86_64' }}
+        run: |
+          mkdir -p ci-results
+          { uname -a; rustc -Vv; cargo -V; } | tee ci-results/startup-environment.log
+          python3 tools/qualify_startup_cleanup.py --package mad-hakoniwa \
+            --features all --arch "$EXPECTED_ARCH" --out ci-results/startup-cleanup \
+            2>&1 | tee ci-results/startup-driver.log
+      - name: Retain startup cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: startup-cleanup-${{ matrix.os }}
+          path: |
+            ci-results/*.log
+            ci-results/startup-cleanup/*.log
+            ci-results/startup-cleanup/result.json
+          retention-days: 7
+          if-no-files-found: warn

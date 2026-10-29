@@ -18,6 +18,12 @@ owned inner PID with a pidfd. Failed startup either completes cleanup or retains
 its authority. Cancellation targets the inner process even after it clears
 PDEATHSIG. The acquired rootfs stays with Child until disposal.
 
+A cached setup failure is distinct from a reaped supervisor result. Failed
+startup retains its original error and any acquired workload descriptor.
+`wait()` still reaps the supervisor; `try_wait()` reports no completion
+while it is alive. This preserves supervisor identity acquisition after
+`spawn()` and clears the pending-cleanup hint only after a kernel wait.
+
 Termination preserves an observed exit or signal before projecting shell codes.
 Exit 137 remains distinct from SIGKILL. Child::kill therefore reports the inner
 signal result instead of a supervisor setup failure. This behavior and the
