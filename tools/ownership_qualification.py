@@ -37,7 +37,8 @@ def main() -> None:
         archive = subprocess.check_output(["git", "archive", revision])
         roots[lane].mkdir()
         with tarfile.open(fileobj=io.BytesIO(archive)) as source:
-            source.extractall(roots[lane], filter="data")
+            # These pinned Git trees contain guest-absolute BusyBox fixture links.
+            source.extractall(roots[lane], filter="fully_trusted")
     for name in ("ownership_parity_test.rs", "support/ownership_parity.rs"):
         target = roots["baseline"] / "hakoniwa/tests" / name
         target.parent.mkdir(parents=True, exist_ok=True)
