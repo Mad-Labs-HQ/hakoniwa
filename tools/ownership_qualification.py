@@ -32,8 +32,9 @@ def main() -> None:
     checkout = Path.cwd()
     output = Path(destination).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    roots = {lane: output / lane for lane in ("baseline", "candidate")}
-    for lane, revision in (("baseline", baseline), ("candidate", candidate)):
+    reaping_baseline = "58f201cc00ebdd0b6684f865264ce95c0bda13b7"
+    roots = {lane: output / lane for lane in ("baseline", "reaping-baseline", "candidate")}
+    for lane, revision in (("baseline", baseline), ("reaping-baseline", reaping_baseline), ("candidate", candidate)):
         archive = subprocess.check_output(["git", "archive", revision])
         roots[lane].mkdir()
         with tarfile.open(fileobj=io.BytesIO(archive)) as source:
@@ -41,6 +42,10 @@ def main() -> None:
             source.extractall(roots[lane], filter="fully_trusted")
     for name in ("ownership_parity_test.rs", "support/ownership_parity.rs"):
         target = roots["baseline"] / "hakoniwa/tests" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(roots["candidate"] / "hakoniwa/tests" / name, target)
+    for name in ("setup_reaping_test.rs", "support/setup_reaping.rs"):
+        target = roots["reaping-baseline"] / "hakoniwa/tests" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(roots["candidate"] / "hakoniwa/tests" / name, target)
     source_hashes = {
@@ -52,6 +57,7 @@ def main() -> None:
         "status": "running",
         "candidate": candidate,
         "baseline": baseline,
+        "reaping_baseline": reaping_baseline,
         "qualification_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True
         ).strip(),
@@ -62,9 +68,15 @@ def main() -> None:
             lane: digest(root / "hakoniwa/tests/support/ownership_parity.rs")
             for lane, root in roots.items()
         },
+        "shared_reaping_sha256": {
+            lane: digest(roots[lane] / "hakoniwa/tests/support/setup_reaping.rs")
+            for lane in ("reaping-baseline", "candidate")
+        },
     }
     if len(set(result["shared_regression_sha256"].values())) != 1:
         raise AssertionError("baseline and candidate regression bodies differ")
+    if len(set(result["shared_reaping_sha256"].values())) != 1:
+        raise AssertionError("baseline and candidate reaping regressions differ")
 
     def save() -> None:
         (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -79,14 +91,15 @@ def main() -> None:
             "TMPDIR": str(temporary),
         }
 
-    def run(label: str, lane: str, argv: list[str], failure: str | None = None) -> None:
+    def run(label: str, lane: str, argv: list[str], failure: str | None = None,
+            extra: dict[str, str] | None = None) -> None:
         """Accept negative cases only at their intended runtime assertion."""
         print(label, flush=True)
         with (output / f"{label}.log").open("w") as log:
             completed = subprocess.run(
                 argv,
                 cwd=roots[lane],
-                env=environment(lane),
+                env={**environment(lane), **(extra or {})},
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -113,6 +126,22 @@ def main() -> None:
             result["cleaned_targets"].append(lane)
             save()
 
+    def reaping_binary(lane: str, label: str) -> str:
+        run(label, lane, tests("--test", "setup_reaping_test", "--no-run", "--message-format=json"))
+        artifacts = [json.loads(line) for line in (output / f"{label}.log").read_text().splitlines()
+                     if line.startswith("{")]
+        binary, = [row["executable"] for row in artifacts
+                   if row.get("reason") == "compiler-artifact" and row.get("executable")]
+        return binary
+
+    def refused(lane: str, binary: str, prefix: str, failure: str | None = None) -> None:
+        for error in [1, 38]:
+            run(f"{prefix}-{error}", lane, [sys.executable, str(checkout / "tools/refuse_syscall.py"),
+                "pidfd_open", str(error), binary,
+                "shared::refused_acquisition_must_reap_before_wait_returns",
+                "--exact", "--ignored", "--nocapture"], failure,
+                {"HAKONIWA_PIDFD_REFUSAL": str(error)})
+
     child = roots["candidate"] / "hakoniwa/src/child.rs"
     original = child.read_bytes()
     try:
@@ -127,14 +156,21 @@ def main() -> None:
                 "--test", "ownership_parity_test", f"shared::{name}",
                 "--", "--exact", "--nocapture"), failure)
         clean("baseline")
+        previous = reaping_binary("reaping-baseline", "reaping-baseline-compile")
+        refused("reaping-baseline", previous, "reaping-baseline-refusal",
+                "cached pidfd acquisition failure returned from wait without reaping")
+        clean("reaping-baseline")
         run("candidate-format", "candidate", ["cargo", "fmt", "--all", "--", "--check"])
         run("candidate-clippy", "candidate", [
             "cargo", "clippy", "--locked", "-p", "hakoniwa", "--all-features",
             "--lib", "--test", "ownership_repair", "--test", "ownership_parity_test",
+            "--test", "setup_reaping_test",
             "--", "-D", "warnings",
         ])
         run("candidate-all-tests", "candidate", tests("--all-targets", "--", "--nocapture"))
         run("candidate-doctests", "candidate", tests("--doc", "--", "--nocapture"))
+        current = reaping_binary("candidate", "candidate-reaping-compile")
+        refused("candidate", current, "candidate-refusal")
         for iteration in range(5):
             run(f"candidate-parallel-{iteration}", "candidate", tests(
                 "--test", "ownership_parity_test", "--", "--test-threads=4", "--nocapture"))
@@ -148,7 +184,7 @@ def main() -> None:
             "--", "--exact", "--nocapture"), "Child::kill left the workload alive")
         child.write_bytes(original)
         retention = original.decode().replace(
-            "        self.logging();\n", "        self.logging();\n        drop(self._tmpdir.take());\n", 1)
+            "        Self::logging(&status);\n", "        Self::logging(&status);\n        drop(self._tmpdir.take());\n", 1)
         if retention == original.decode():
             raise AssertionError("rootfs ablation did not alter source")
         child.write_text(retention)
@@ -158,6 +194,19 @@ def main() -> None:
         child.write_bytes(original)
         run("candidate-restored", "candidate", tests(
             "--test", "ownership_parity_test", "--", "--test-threads=4", "--nocapture"))
+        shortcut = original.decode().replace(
+            "if let ChildState::Reaped(status) = &self.state {",
+            "if let ChildState::SetupFailed(status) | ChildState::Reaped(status) = &self.state {")
+        if shortcut == original.decode():
+            raise AssertionError("reaping ablation did not alter source")
+        child.write_text(shortcut)
+        ablated = reaping_binary("candidate", "candidate-reaping-ablated-compile")
+        refused("candidate", ablated, "candidate-reaping-ablated",
+                "cached pidfd acquisition failure returned from wait without reaping")
+        child.write_bytes(original)
+        restored = reaping_binary("candidate", "candidate-reaping-restored-compile")
+        refused("candidate", restored, "candidate-reaping-restored")
+        run("candidate-restored-unit-tests", "candidate", tests("--lib", "--", "--nocapture"))
         for name, expected in source_hashes.items():
             if digest(roots["candidate"] / name) != expected:
                 raise AssertionError(f"candidate source not restored: {name}")
