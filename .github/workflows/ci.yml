@@ -38,7 +38,8 @@ jobs:
       - name: Check dependencies and feature combinations
         run: |
           cargo deny --all-features --log-level error check
-          cargo hack check --locked --feature-powerset --no-dev-deps
+          # cargo-hack changes manifests for --no-dev-deps, so its lockfile must be writable.
+          cargo hack check --feature-powerset --no-dev-deps
 
   lints:
     name: Lints
