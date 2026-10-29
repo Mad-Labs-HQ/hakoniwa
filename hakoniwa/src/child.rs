@@ -251,9 +251,8 @@ impl Child {
                 .map_err(Into::into);
         }
 
-        // If we've already waited on this process then the pid can be recycled
-        // and used for another process, and we probably shouldn't be killing
-        // random processes, so return Ok because the process has exited already.
+        // Rejected setup keeps cooperative cleanup with its supervisor.
+        // After reaping, the numeric supervisor PID may belong to another process.
         if !matches!(self.state, ChildState::Running) {
             return Ok(());
         }
@@ -322,8 +321,8 @@ impl Child {
         }
     }
 
-    /// Retains the original setup report while recording that the supervisor
-    /// was reaped. Workload status is decoded only for admitted startup.
+    /// Records supervisor reaping while preserving any cached setup failure.
+    /// Otherwise, decode its final report, including setup failures sent by FIN.
     fn retrieve_exit_status(&mut self, ws: WaitStatus) -> Result<ExitStatus> {
         let status = match &self.state {
             ChildState::SetupFailed(status) | ChildState::Reaped(status) => status.clone(),

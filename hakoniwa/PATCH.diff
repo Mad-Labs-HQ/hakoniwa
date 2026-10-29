@@ -233,7 +233,7 @@ index 0000000..e04ba97
 +    Ok(())
 +}
 diff --git a/src/child.rs b/src/child.rs
-index 0aec6be..23db4a6 100644
+index 0aec6be..34b159f 100644
 --- a/src/child.rs
 +++ b/src/child.rs
 @@ -1,18 +1,41 @@
@@ -356,7 +356,7 @@ index 0aec6be..23db4a6 100644
              #[cfg(feature = "cgroups")]
              cgroup,
              #[cfg(feature = "rustslirp")]
-@@ -187,12 +224,37 @@ impl Child {
+@@ -187,12 +224,36 @@ impl Child {
          self.pid.as_raw() as u32
      }
  
@@ -381,21 +381,23 @@ index 0aec6be..23db4a6 100644
 +
      /// Forces the child process to exit.
      pub fn kill(&mut self) -> Result<()> {
+-        // If we've already waited on this process then the pid can be recycled
+-        // and used for another process, and we probably shouldn't be killing
+-        // random processes, so return Ok because the process has exited already.
+-        if self.status.is_some() {
 +        if let Some(descriptor) = self.inner_pidfd() {
 +            return crate::startup::stop(descriptor)
 +                .map_err(ProcessErrorKind::StdIoError)
 +                .map_err(Into::into);
 +        }
 +
-         // If we've already waited on this process then the pid can be recycled
-         // and used for another process, and we probably shouldn't be killing
-         // random processes, so return Ok because the process has exited already.
--        if self.status.is_some() {
++        // Rejected setup keeps cooperative cleanup with its supervisor.
++        // After reaping, the numeric supervisor PID may belong to another process.
 +        if !matches!(self.state, ChildState::Running) {
              return Ok(());
          }
  
-@@ -213,12 +275,12 @@ impl Child {
+@@ -213,12 +274,12 @@ impl Child {
      ///
      /// Note that unlike wait, this function will not attempt to drop stdin.
      pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
@@ -410,7 +412,7 @@ index 0aec6be..23db4a6 100644
          if let WaitStatus::StillAlive = ws {
              Ok(None)
          } else {
-@@ -236,108 +298,121 @@ impl Child {
+@@ -236,108 +297,121 @@ impl Child {
      pub fn wait(&mut self) -> Result<ExitStatus> {
          drop(self.stdin.take());
  
@@ -441,8 +443,8 @@ index 0aec6be..23db4a6 100644
 +        }
 +    }
 +
-+    /// Retains the original setup report while recording that the supervisor
-+    /// was reaped. Workload status is decoded only for admitted startup.
++    /// Records supervisor reaping while preserving any cached setup failure.
++    /// Otherwise, decode its final report, including setup failures sent by FIN.
      fn retrieve_exit_status(&mut self, ws: WaitStatus) -> Result<ExitStatus> {
 -        if let WaitStatus::Signaled(_, Signal::SIGKILL, _) = ws {
 -            let reason = "container received signal SIGKILL";
@@ -606,7 +608,7 @@ index 0aec6be..23db4a6 100644
          }
      }
  
-@@ -408,3 +483,6 @@ impl Child {
+@@ -408,3 +482,6 @@ impl Child {
          Ok(())
      }
  }
