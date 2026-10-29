@@ -43,8 +43,11 @@ runtime test. This is a preparation check, not native qualification.
 
 The Linux entrypoint uses the copied harness and archive. It runs workspace
 checks, relocated bundles, the installer, focused library tests and compiled
-fault probes. This lane still targets the existing ARM64 lab. Native x86-64
-and hosted CI remain separate work.
+fault probes. Incremental builds and debug information are disabled. Completed
+Run and standalone-consumer targets are cleaned between stages; all generated
+targets are cleaned on completion or failure. Logs and frozen inputs remain.
+This lane still targets the existing ARM64 lab. Native x86-64 and hosted CI
+remain separate work.
 
 ## Permanent tests
 

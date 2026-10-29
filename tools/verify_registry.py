@@ -105,8 +105,22 @@ def main() -> None:
             )
         return result.stdout if machine else (out / (label + ".log")).read_text()
 
+    def clean_target(label: str, cwd: Path) -> None:
+        """Release completed build stages without deleting their logs or inputs."""
+        target = out / "targets" / label
+        if (target / "CACHEDIR.TAG").exists():
+            run(
+                f"clean-{label}-{len(record.get('cleaned_targets', []))}",
+                ["cargo", "clean", "--locked", "--target-dir", target],
+                cwd=cwd,
+                environment=environment(label),
+            )
+            record.setdefault("cleaned_targets", []).append(label)
+            save()
+
     server = None
     thread = None
+    target_roots: dict[str, Path] = {}
     try:
         baseline = json.loads((inputs / "BASELINE.json").read_text())
         for name, expected in baseline["input_files"].items():
@@ -122,6 +136,7 @@ def main() -> None:
             if (destination / "vendor").exists():
                 raise ValueError("vendor archive must not enter this replay")
         sandbox, run_root = workspace / "mad-sandbox", workspace / "mad-run"
+        target_roots.update({"mad-sandbox": sandbox, "mad-run": run_root})
         original_lockfiles = {
             repo: (repo / "Cargo.lock").read_text() for repo in (sandbox, run_root)
         }
@@ -187,6 +202,9 @@ def main() -> None:
                 **env,
                 "CARGO_HOME": str(home),
                 "CARGO_TARGET_DIR": str(out / "targets" / label),
+                "CARGO_INCREMENTAL": "0",
+                "CARGO_PROFILE_DEV_DEBUG": "0",
+                "CARGO_PROFILE_TEST_DEBUG": "0",
             }
 
         graphs = {}
@@ -371,7 +389,10 @@ def main() -> None:
             environment=environment(run_root.name),
         )
 
+        clean_target("mad-run", run_root)
+
         consumer = workspace / "registry-probe"
+        target_roots["consumer"] = consumer
         shutil.copytree(inputs / "registry-probe", consumer)
         (consumer / "tests").mkdir()
         for path in sorted((inputs / "upstream-tests").rglob("*.rs")):
@@ -432,6 +453,15 @@ tempfile = "3.27.0"
             },
         )
         run(
+            "consumer-termination-image",
+            ["cargo", "test", "--locked", "--test", "termination_repair", "--", "--nocapture"],
+            cwd=consumer,
+            environment={
+                **consumer_env,
+                "HAKONIWA_TEST_SUPERVISOR": str(out / "targets/consumer/debug/supervisor"),
+            },
+        )
+        run(
             "consumer-overlays",
             [
                 "cargo",
@@ -451,6 +481,7 @@ tempfile = "3.27.0"
                 ),
             },
         )
+        clean_target("consumer", consumer)
         for label, script, marker, count in (
             ("startup-faults", "check-linux-startup.py", "STARTUP_FAULT_REAPED", 8),
             (
@@ -495,6 +526,7 @@ tempfile = "3.27.0"
             environment=environment(sandbox.name),
         )
         record["source_restored"] = True
+        clean_target("mad-sandbox", sandbox)
         damaged = True
         negative = out / "negative-cargo-home"
         negative.mkdir()
@@ -517,6 +549,15 @@ tempfile = "3.27.0"
         record["status"] = "failed"
         raise
     finally:
+        cleanup_errors = []
+        for label, root in target_roots.items():
+            try:
+                clean_target(label, root)
+            except Exception as error:
+                cleanup_errors.append(f"{label}: {error}")
+        record["cargo_targets_cleaned"] = not cleanup_errors
+        if cleanup_errors:
+            record.update(status="failed", cleanup_errors=cleanup_errors)
         if server is not None:
             server.shutdown()
             server.server_close()
@@ -525,6 +566,8 @@ tempfile = "3.27.0"
         record["completed_at"] = datetime.now(timezone.utc).isoformat()
         save()
         print(json.dumps({"status": record["status"], "out": str(out)}), flush=True)
+        if cleanup_errors:
+            raise RuntimeError("registry target cleanup failed: " + "; ".join(cleanup_errors))
 
 
 if __name__ == "__main__":
