@@ -29,11 +29,15 @@ its original typed error. Later waits report ChildExitStatusGone without another
 kernel wait. The acquired workload pidfd and rootfs remain owned by Child, and
 kill cannot signal a recycled numeric supervisor PID.
 
-The typed termination accessor decodes the existing code and exit_code fields.
-Exit 137 remains distinct from SIGKILL without adding a stored field or changing
-the upstream ExitStatus wire layout. Child::kill reports the inner signal result
-instead of a supervisor setup failure. Removing the fork's former field requires
-rebuilding its host and image helper together.
+ExitStatus retains upstream's public fields and wire layout. Normal exits carry
+exit_code; signal reports use 128 + signal without exit_code. Container failure
+125 without exit_code carries no observed inner outcome. Consumers interpret
+these fields at their own integration boundary. The fork adds no termination
+enum, accessor or stored field.
+
+Child::kill reports the inner signal result instead of a supervisor setup
+failure. Hosts and image helpers must still be rebuilt together so their source
+fingerprints match.
 
 The remount fallback retains requested read-only access while incorporating
 locked source-mount flags. Its native control also requires a writable neighbor.

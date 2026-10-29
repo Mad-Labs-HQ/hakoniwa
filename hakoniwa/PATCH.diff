@@ -62,127 +62,66 @@ index 206fa1a..cb91836 100644
  pub struct Resources {
      cpu: Option<Cpu>,
      memory: Option<Memory>,
-diff --git a/src/child/termination_tests.rs b/src/child/termination_tests.rs
+diff --git a/src/child/status_tests.rs b/src/child/status_tests.rs
 new file mode 100644
-index 0000000..ce3659a
+index 0000000..c2dcb1c
 --- /dev/null
-+++ b/src/child/termination_tests.rs
-@@ -0,0 +1,117 @@
++++ b/src/child/status_tests.rs
+@@ -0,0 +1,56 @@
 +//! Modification notice: Mad Labs, Inc added this file on 2026-10-29.
 +//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 +//!
-+//! Checks the typed view against status constructors and the original wire shape.
++//! Checks the native report fields and original serialized record layout.
 +//!
-+//! Assumes library reports use exit_code to distinguish exits from signals.
-+//! Synthetic signal cases test normalization, not native delivery of every signal.
++//! Assumes library constructors encode normal exits through exit_code. Signal
++//! cases test normalization; they do not deliver every signal through the kernel.
 +
-+use super::{ExitStatus, Termination};
++use super::ExitStatus;
 +use nix::sys::{signal::Signal, wait::WaitStatus};
 +use nix::unistd::Pid;
 +
-+/// Constructs the original public record without adding a required field.
-+fn report(code: i32, exit_code: Option<i32>) -> ExitStatus {
-+    ExitStatus {
-+        code,
-+        reason: "legacy fixture".into(),
-+        exit_code,
-+        rusage: None,
-+        proc_pid_smaps_rollup: None,
-+        proc_pid_status: None,
-+    }
-+}
-+
-+/// Requires each constructor's existing fields to retain its typed outcome.
++/// Preserves the field pairs consumed by application-specific result adapters.
 +#[test]
-+fn constructors_preserve_exit_and_signal_facts() {
++fn constructors_preserve_exit_and_signal_fields() {
 +    let container = crate::Container::new();
 +    let command = container.command("fixture");
 +    let pid = Pid::from_raw(1);
 +
 +    for code in 0..=255 {
 +        let status = ExitStatus::from_wait_status(&WaitStatus::Exited(pid, code), &command);
-+        assert_eq!(status.termination(), Some(Termination::Exited(code)));
++        assert_eq!((status.code, status.exit_code), (code, Some(code)));
 +    }
 +
 +    for signal in Signal::iterator() {
 +        let status =
 +            ExitStatus::from_wait_status(&WaitStatus::Signaled(pid, signal, false), &command);
-+        assert_eq!(
-+            status.termination(),
-+            Some(Termination::Signaled(signal as i32))
-+        );
++        assert_eq!((status.code, status.exit_code), (128 + signal as i32, None));
 +    }
++
++    let failed = ExitStatus::new_failure("setup failed");
++    assert_eq!((failed.code, failed.exit_code), (125, None));
 +}
 +
-+/// Prevents a container failure from becoming a fabricated exit or signal.
-+#[test]
-+fn container_failure_has_no_inner_termination() {
-+    assert_eq!(ExitStatus::new_failure("setup failed").termination(), None);
-+    assert_eq!(
-+        report(125, Some(125)).termination(),
-+        Some(Termination::Exited(125))
-+    );
-+    assert_eq!(
-+        report(137, Some(137)).termination(),
-+        Some(Termination::Exited(137))
-+    );
-+    assert_eq!(
-+        report(137, None).termination(),
-+        Some(Termination::Signaled(9))
-+    );
-+}
-+
-+/// Rejects contradictory values without accepting a signal-shaped numeric exit.
-+#[test]
-+fn inconsistent_fields_have_no_typed_view() {
-+    for (code, exit_code) in [
-+        (-1, None),
-+        (0, None),
-+        (128, None),
-+        (256, None),
-+        (137, Some(0)),
-+        (137, Some(-1)),
-+        (256, Some(256)),
-+    ] {
-+        assert_eq!(report(code, exit_code).termination(), None);
-+    }
-+}
-+
-+/// Treats reason as diagnostic text, independent of the structured fields.
-+#[test]
-+fn diagnostic_text_cannot_change_termination() {
-+    let numeric = ExitStatus {
-+        reason: "received signal SIGKILL".into(),
-+        ..report(137, Some(137))
-+    };
-+    let signaled = ExitStatus {
-+        reason: "exited normally".into(),
-+        ..report(137, None)
-+    };
-+    let failed = ExitStatus {
-+        reason: "process exited with code 137".into(),
-+        ..report(125, None)
-+    };
-+
-+    assert_eq!(numeric.termination(), Some(Termination::Exited(137)));
-+    assert_eq!(signaled.termination(), Some(Termination::Signaled(9)));
-+    assert_eq!(failed.termination(), None);
-+}
-+
-+/// Keeps a pre-accessor struct literal and its frozen Postcard bytes usable.
++/// Keeps an original public literal and its frozen Postcard bytes usable.
 +#[test]
 +fn original_public_record_and_wire_layout_survive() -> Result<(), postcard::Error> {
-+    let status = report(137, Some(137));
-+    // This fixture was encoded by the original six-field upstream record.
++    let status = ExitStatus {
++        code: 137,
++        reason: "legacy fixture".into(),
++        exit_code: Some(137),
++        rusage: None,
++        proc_pid_smaps_rollup: None,
++        proc_pid_status: None,
++    };
++    // The frozen bytes came from the original upstream six-field record.
 +    let legacy = b"\x92\x02\x0elegacy fixture\x01\x92\x02\x00\x00\x00";
 +    assert_eq!(
 +        postcard::to_allocvec(&status)?,
 +        legacy,
-+        "typed accessor changed the legacy status wire shape"
++        "native report changed the original wire shape"
 +    );
 +    let decoded = postcard::from_bytes::<ExitStatus>(legacy)?;
 +    assert_eq!((decoded.code, decoded.exit_code), (137, Some(137)));
-+    assert_eq!(decoded.termination(), Some(Termination::Exited(137)));
 +    Ok(())
 +}
 diff --git a/src/child/tests.rs b/src/child/tests.rs
@@ -489,10 +428,10 @@ index 0000000..273ed83
 +    Ok(())
 +}
 diff --git a/src/child.rs b/src/child.rs
-index 0aec6be..8256116 100644
+index 0aec6be..a0919e9 100644
 --- a/src/child.rs
 +++ b/src/child.rs
-@@ -1,25 +1,45 @@
+@@ -1,9 +1,20 @@
 +//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
 +//! 2026-10-29.
 +//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
@@ -513,18 +452,7 @@ index 0aec6be..8256116 100644
  use std::thread;
  use std::{fmt, str};
  use tempfile::TempDir;
- 
- use crate::{Command, ProcPidSmapsRollup, ProcPidStatus, Rusage, error::*};
- 
-+/// A typed view of the inner process outcome encoded in an exit report.
-+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-+pub enum Termination {
-+    /// Normal exit status.
-+    Exited(i32),
-+    /// Terminating signal.
-+    Signaled(i32),
-+}
-+
+@@ -13,13 +24,13 @@ use crate::{Command, ProcPidSmapsRollup, ProcPidStatus, Rusage, error::*};
  /// Result of a process after it has terminated.
  #[derive(Serialize, Deserialize, Clone, Debug)]
  pub struct ExitStatus {
@@ -540,54 +468,7 @@ index 0aec6be..8256116 100644
      pub exit_code: Option<i32>,
  
      /// Information about resource usage of the internal process.
-@@ -37,6 +57,46 @@ pub struct ExitStatus {
- }
- 
- impl ExitStatus {
-+    /// Decodes the inner outcome from the existing report fields.
-+    ///
-+    /// Normal exits have equal `code` and `exit_code`. Signal reports have no
-+    /// `exit_code` and encode `128 + signal` in `code`. Container failures use code
-+    /// 125 without an `exit_code`, so they carry no observed inner termination.
-+    ///
-+    /// Returns `None` for missing or inconsistent outcome fields. Diagnostic text
-+    /// is not parsed. The view relies on this producer contract; public fields
-+    /// cannot authenticate records constructed or changed by callers.
-+    ///
-+    /// # Examples
-+    ///
-+    /// These records illustrate the encoding, rather than a kernel observation.
-+    ///
-+    /// ```
-+    /// use hakoniwa::{ExitStatus, Termination};
-+    ///
-+    /// let exited = ExitStatus {
-+    ///     code: 137,
-+    ///     reason: String::new(),
-+    ///     exit_code: Some(137),
-+    ///     rusage: None,
-+    ///     proc_pid_smaps_rollup: None,
-+    ///     proc_pid_status: None,
-+    /// };
-+    /// assert_eq!(exited.termination(), Some(Termination::Exited(137)));
-+    ///
-+    /// let signaled = ExitStatus { exit_code: None, ..exited };
-+    /// assert_eq!(signaled.termination(), Some(Termination::Signaled(9)));
-+    /// ```
-+    pub fn termination(&self) -> Option<Termination> {
-+        match (self.code, self.exit_code) {
-+            (code, Some(exit)) if code == exit && (0..=255).contains(&exit) => {
-+                Some(Termination::Exited(exit))
-+            }
-+            (code @ 129..=255, None) => Some(Termination::Signaled(code - 128)),
-+            _ => None,
-+        }
-+    }
-+
-     pub(crate) const SUCCESS: i32 = 0;
-     pub(crate) const FAILURE: i32 = 125; // If the Container itself fails.
- 
-@@ -119,6 +179,15 @@ impl fmt::Debug for Output {
+@@ -119,6 +130,15 @@ impl fmt::Debug for Output {
      }
  }
  
@@ -603,7 +484,7 @@ index 0aec6be..8256116 100644
  /// Representation of a running or exited child process.
  ///
  /// A child process is created via the [Command::spawn]. This struct is similar
-@@ -128,10 +197,11 @@ impl fmt::Debug for Output {
+@@ -128,10 +148,11 @@ impl fmt::Debug for Output {
  /// [std::process::Child]: https://doc.rust-lang.org/std/process/struct.Child.html
  pub struct Child {
      pid: Pid,
@@ -617,7 +498,7 @@ index 0aec6be..8256116 100644
  
      /// Only initialized when using [Stdio::piped()](crate::Stdio::piped()).
      pub stdin: Option<PipeWriter>,
-@@ -156,6 +226,7 @@ impl Child {
+@@ -156,6 +177,7 @@ impl Child {
      #[allow(clippy::too_many_arguments)]
      pub(crate) fn new(
          pid: Pid,
@@ -625,7 +506,7 @@ index 0aec6be..8256116 100644
          stdin: Option<PipeWriter>,
          stdout: Option<PipeReader>,
          stderr: Option<PipeReader>,
-@@ -168,13 +239,14 @@ impl Child {
+@@ -168,13 +190,14 @@ impl Child {
      ) -> Self {
          Self {
              pid,
@@ -642,7 +523,7 @@ index 0aec6be..8256116 100644
              #[cfg(feature = "cgroups")]
              cgroup,
              #[cfg(feature = "rustslirp")]
-@@ -187,12 +259,36 @@ impl Child {
+@@ -187,12 +210,36 @@ impl Child {
          self.pid.as_raw() as u32
      }
  
@@ -683,7 +564,7 @@ index 0aec6be..8256116 100644
              return Ok(());
          }
  
-@@ -204,21 +300,28 @@ impl Child {
+@@ -204,21 +251,28 @@ impl Child {
      ///
      /// This function will not block the calling thread and will only check to see
      /// if the child process has exited or not. If the child has exited then on Unix
@@ -717,7 +598,7 @@ index 0aec6be..8256116 100644
          if let WaitStatus::StillAlive = ws {
              Ok(None)
          } else {
-@@ -233,111 +336,134 @@ impl Child {
+@@ -233,111 +287,134 @@ impl Child {
      /// waiting. This helps avoid deadlock: it ensures that the child does not
      /// block waiting for input from the parent, while the parent waits for
      /// the child to exit.
@@ -928,7 +809,7 @@ index 0aec6be..8256116 100644
          }
      }
  
-@@ -408,3 +534,9 @@ impl Child {
+@@ -408,3 +485,9 @@ impl Child {
          Ok(())
      }
  }
@@ -937,7 +818,7 @@ index 0aec6be..8256116 100644
 +mod tests;
 +
 +#[cfg(test)]
-+mod termination_tests;
++mod status_tests;
 diff --git a/src/command.rs b/src/command.rs
 index 2256594..df8b74b 100644
 --- a/src/command.rs
@@ -1416,7 +1297,7 @@ index 48c5cc1..1b59989 100644
      pub(crate) restrictions: HashMap<Resource, CompatMode>,
      pub(crate) fs_rules: HashMap<String, FsRule>,
 diff --git a/src/lib.rs b/src/lib.rs
-index 29e7f38..998abc7 100644
+index 29e7f38..aa6ec23 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -1,3 +1,7 @@
@@ -1427,7 +1308,7 @@ index 29e7f38..998abc7 100644
  //! Process isolation for Linux using namespaces, resource limits, cgroups, landlock
  //! and seccomp. It works by creating a new, completely empty, mount namespace where
  //! the root is on a tmpdir, and will be automatically cleaned up when the last
-@@ -34,12 +38,13 @@ mod rlimit;
+@@ -34,6 +38,7 @@ mod rlimit;
  mod runc;
  mod runctl;
  mod stdio;
@@ -1435,13 +1316,6 @@ index 29e7f38..998abc7 100644
  mod unshare;
  
  use etcfs::{GroupFile, PasswdFile};
- use unshare::{FsOperation, IdMap, Mount};
- 
--pub use child::{Child, ExitStatus, Output};
-+pub use child::{Child, ExitStatus, Output, Termination};
- pub use command::Command;
- pub use container::Container;
- pub use error::{Error, Result};
 @@ -47,6 +52,7 @@ pub use metric::{ProcPidSmapsRollup, ProcPidStatus, Rusage};
  pub use rlimit::Rlimit;
  pub use runctl::Runctl;

@@ -4,7 +4,7 @@
 //! a namespace init process has special signal behavior and cannot serve as
 //! an ordinary shell self-signal fixture.
 
-use hakoniwa::{Command, Container, Supervisor, Termination};
+use hakoniwa::{Command, Container, Supervisor};
 use std::io;
 
 /// Selects the explicit fork control or the supplied matching image helper.
@@ -27,7 +27,7 @@ fn exit_137_and_sigkill_keep_distinct_kernel_facts() -> io::Result<()> {
         .status()
         .map_err(io::Error::other)?;
     assert_eq!(exited.code, 137);
-    assert_eq!(exited.termination(), Some(Termination::Exited(137)));
+    assert_eq!(exited.exit_code, Some(137));
 
     let mut sleeps = Container::new()
         .rootfs("/")
@@ -38,6 +38,6 @@ fn exit_137_and_sigkill_keep_distinct_kernel_facts() -> io::Result<()> {
     child.kill().map_err(io::Error::other)?;
     let killed = child.wait().map_err(io::Error::other)?;
     assert_eq!(killed.code, 137);
-    assert_eq!(killed.termination(), Some(Termination::Signaled(9)));
+    assert_eq!(killed.exit_code, None);
     Ok(())
 }

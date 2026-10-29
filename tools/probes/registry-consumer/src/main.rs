@@ -2,7 +2,7 @@
 //!
 //! Requires native Linux namespaces. No SDK or Mad Sandbox source is imported.
 
-use hakoniwa::{Container, Termination};
+use hakoniwa::Container;
 use std::io;
 
 /// Runs a short guest and requires an observed successful process exit.
@@ -13,8 +13,8 @@ fn main() -> io::Result<()> {
         .command("/bin/true")
         .status()
         .map_err(io::Error::other)?;
-    match status.termination() {
-        Some(Termination::Exited(0)) => Ok(()),
+    match (status.code, status.exit_code) {
+        (0, Some(0)) => Ok(()),
         other => Err(io::Error::other(format!(
             "unexpected termination: {other:?}"
         ))),

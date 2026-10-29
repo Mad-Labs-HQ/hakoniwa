@@ -21,15 +21,6 @@ use tempfile::TempDir;
 
 use crate::{Command, ProcPidSmapsRollup, ProcPidStatus, Rusage, error::*};
 
-/// A typed view of the inner process outcome encoded in an exit report.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Termination {
-    /// Normal exit status.
-    Exited(i32),
-    /// Terminating signal.
-    Signaled(i32),
-}
-
 /// Result of a process after it has terminated.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ExitStatus {
@@ -57,46 +48,6 @@ pub struct ExitStatus {
 }
 
 impl ExitStatus {
-    /// Decodes the inner outcome from the existing report fields.
-    ///
-    /// Normal exits have equal `code` and `exit_code`. Signal reports have no
-    /// `exit_code` and encode `128 + signal` in `code`. Container failures use code
-    /// 125 without an `exit_code`, so they carry no observed inner termination.
-    ///
-    /// Returns `None` for missing or inconsistent outcome fields. Diagnostic text
-    /// is not parsed. The view relies on this producer contract; public fields
-    /// cannot authenticate records constructed or changed by callers.
-    ///
-    /// # Examples
-    ///
-    /// These records illustrate the encoding, rather than a kernel observation.
-    ///
-    /// ```
-    /// use hakoniwa::{ExitStatus, Termination};
-    ///
-    /// let exited = ExitStatus {
-    ///     code: 137,
-    ///     reason: String::new(),
-    ///     exit_code: Some(137),
-    ///     rusage: None,
-    ///     proc_pid_smaps_rollup: None,
-    ///     proc_pid_status: None,
-    /// };
-    /// assert_eq!(exited.termination(), Some(Termination::Exited(137)));
-    ///
-    /// let signaled = ExitStatus { exit_code: None, ..exited };
-    /// assert_eq!(signaled.termination(), Some(Termination::Signaled(9)));
-    /// ```
-    pub fn termination(&self) -> Option<Termination> {
-        match (self.code, self.exit_code) {
-            (code, Some(exit)) if code == exit && (0..=255).contains(&exit) => {
-                Some(Termination::Exited(exit))
-            }
-            (code @ 129..=255, None) => Some(Termination::Signaled(code - 128)),
-            _ => None,
-        }
-    }
-
     pub(crate) const SUCCESS: i32 = 0;
     pub(crate) const FAILURE: i32 = 125; // If the Container itself fails.
 
@@ -539,4 +490,4 @@ impl Child {
 mod tests;
 
 #[cfg(test)]
-mod termination_tests;
+mod status_tests;

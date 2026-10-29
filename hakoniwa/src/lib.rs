@@ -44,7 +44,7 @@ mod unshare;
 use etcfs::{GroupFile, PasswdFile};
 use unshare::{FsOperation, IdMap, Mount};
 
-pub use child::{Child, ExitStatus, Output, Termination};
+pub use child::{Child, ExitStatus, Output};
 pub use command::Command;
 pub use container::Container;
 pub use error::{Error, Result};
