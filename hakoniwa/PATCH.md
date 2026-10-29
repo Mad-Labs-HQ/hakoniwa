@@ -24,6 +24,11 @@ startup retains its original error and any acquired workload descriptor.
 while it is alive. This preserves supervisor identity acquisition after
 `spawn()` and clears the pending-cleanup hint only after a kernel wait.
 
+Report read or decode errors cannot undo kernel reaping. The first wait returns
+its original typed error. Later waits report ChildExitStatusGone without another
+kernel wait. The acquired workload pidfd and rootfs remain owned by Child, and
+kill cannot signal a recycled numeric supervisor PID.
+
 Termination preserves an observed exit or signal before projecting shell codes.
 Exit 137 remains distinct from SIGKILL. Child::kill therefore reports the inner
 signal result instead of a supervisor setup failure. This behavior and the

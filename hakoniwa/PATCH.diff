@@ -64,23 +64,23 @@ index 206fa1a..cb91836 100644
      memory: Option<Memory>,
 diff --git a/src/child/tests.rs b/src/child/tests.rs
 new file mode 100644
-index 0000000..e04ba97
+index 0000000..273ed83
 --- /dev/null
 +++ b/src/child/tests.rs
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,297 @@
 +//! Modification notice: Mad Labs, Inc added this file on 2026-10-29.
 +//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 +//!
-+//! Checks pending setup reports against a supervisor held behind an input gate.
++//! Checks setup failures and unreadable reports after supervisor reaping.
 +//!
 +//! Requires native Linux pidfds and /bin/cat. The test owns each child
 +//! exclusively and cleans it up even when an assertion fails.
 +
 +use super::{Child, ChildState, ExitStatus};
-+use crate::startup;
++use crate::{Error, error::ProcessErrorKind, startup};
 +use nix::sys::wait::waitpid;
 +use nix::unistd::Pid;
-+use std::io::{self, PipeWriter};
++use std::io::{self, PipeWriter, Write};
 +use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 +use std::process::{Command, Stdio};
 +
@@ -164,7 +164,10 @@ index 0000000..e04ba97
 +impl Drop for PendingFailure {
 +    fn drop(&mut self) {
 +        drop(self.gate.take());
-+        if !matches!(self.child.state, ChildState::Reaped(_)) {
++        if !matches!(
++            self.child.state,
++            ChildState::Reaped(_) | ChildState::ReapedWithoutReport
++        ) {
 +            let _ = startup::stop(self.supervisor.as_fd());
 +            while let Err(nix::errno::Errno::EINTR) = waitpid(self.child.pid, None) {}
 +        }
@@ -232,8 +235,138 @@ index 0000000..e04ba97
 +    assert!(!probe.child.startup_cleanup_pending());
 +    Ok(())
 +}
++
++/// Waits for exit readiness without consuming the kernel status under test.
++fn supervisor_exited(descriptor: &OwnedFd) -> io::Result<()> {
++    let mut event = libc::pollfd {
++        fd: descriptor.as_raw_fd(),
++        events: libc::POLLIN,
++        revents: 0,
++    };
++
++    // SAFETY: event is a live pollfd and the borrowed descriptor stays open.
++    let ready = unsafe { libc::poll(&mut event, 1, 5000) };
++    match ready {
++        -1 => Err(io::Error::last_os_error()),
++        1 if event.revents & libc::POLLIN != 0 => Ok(()),
++        _ => Err(io::Error::other("supervisor did not exit")),
++    }
++}
++
++/// Kernel reaping must survive errors before FIN, after FIN, and in a report.
++#[test]
++fn report_errors_preserve_reaping_truth() -> io::Result<()> {
++    for poll in [false, true] {
++        for (fin_received, bytes) in [(false, &[][..]), (true, &[][..]), (true, &[0x80][..])] {
++            let mut probe = PendingFailure::new()?;
++            let (reader, mut writer) = std::io::pipe()?;
++            writer.write_all(bytes)?;
++            drop(writer);
++            probe.child.status_reader = Some(reader);
++            probe.child.status_reader_noleading = fin_received;
++            probe.child.state = ChildState::Running;
++            drop(probe.gate.take());
++            supervisor_exited(&probe.supervisor)?;
++            let result = if poll {
++                probe.child.try_wait().map(|_| ())
++            } else {
++                probe.child.wait().map(|_| ())
++            };
++
++            match (fin_received, result) {
++                (false, Err(Error::ProcessError(ProcessErrorKind::StdIoError(error)))) => {
++                    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
++                }
++                (true, Err(Error::ProcessError(ProcessErrorKind::PostcardError(_)))) => {}
++                (_, other) => {
++                    return Err(io::Error::other(format!("unexpected report: {other:?}")));
++                }
++            }
++
++            probe.assert_reaped();
++            assert!(matches!(probe.child.state, ChildState::ReapedWithoutReport));
++            assert!(matches!(
++                probe.child.wait(),
++                Err(Error::ProcessError(ProcessErrorKind::ChildExitStatusGone))
++            ));
++            assert!(matches!(
++                probe.child.try_wait(),
++                Err(Error::ProcessError(ProcessErrorKind::ChildExitStatusGone))
++            ));
++        }
++    }
++
++    Ok(())
++}
++
++/// Losing a report must not revoke stable authority over a surviving workload.
++#[test]
++fn report_error_preserves_workload_authority() -> io::Result<()> {
++    let mut probe = PendingFailure::new()?;
++    probe.acquire_workload()?;
++    let descriptor = probe.child.inner_pidfd().map(|fd| fd.as_raw_fd());
++    probe.child.state = ChildState::Running;
++    probe.child.status_reader_noleading = true;
++    drop(probe.gate.take());
++    assert!(matches!(
++        probe.child.wait(),
++        Err(Error::ProcessError(ProcessErrorKind::PostcardError(_)))
++    ));
++    probe.assert_reaped();
++    assert!(matches!(probe.child.state, ChildState::ReapedWithoutReport));
++    assert!(descriptor.is_some());
++    assert_eq!(
++        probe.child.inner_pidfd().map(|fd| fd.as_raw_fd()),
++        descriptor
++    );
++    probe.child.kill().map_err(io::Error::other)?;
++    let workload = probe
++        .workload
++        .as_mut()
++        .ok_or_else(|| io::Error::other("missing workload"))?;
++    assert!(!workload.wait()?.success());
++    Ok(())
++}
++
++/// A recycled numeric supervisor PID must never authorize a later signal.
++#[test]
++fn report_error_prevents_numeric_pid_signal() -> io::Result<()> {
++    let mut probe = PendingFailure::new()?;
++    probe.acquire_workload()?;
++    let descriptor = probe
++        .child
++        .inner_pidfd
++        .take()
++        .ok_or_else(|| io::Error::other("missing pidfd"))?;
++    let workload = probe
++        .workload
++        .as_ref()
++        .ok_or_else(|| io::Error::other("missing workload"))?;
++    let recycled = Pid::from_raw(i32::try_from(workload.id()).map_err(io::Error::other)?);
++    probe.child.state = ChildState::Running;
++    probe.child.status_reader_noleading = true;
++    drop(probe.gate.take());
++    assert!(matches!(
++        probe.child.wait(),
++        Err(Error::ProcessError(ProcessErrorKind::PostcardError(_)))
++    ));
++    probe.assert_reaped();
++    assert!(matches!(probe.child.state, ChildState::ReapedWithoutReport));
++    probe.child.pid = recycled;
++    probe.child.kill().map_err(io::Error::other)?;
++    let mut event = libc::pollfd {
++        fd: descriptor.as_raw_fd(),
++        events: libc::POLLIN,
++        revents: 0,
++    };
++
++    // SAFETY: event is initialized and the test owns the live pidfd throughout.
++    let ready = unsafe { libc::poll(&mut event, 1, 100) };
++    assert_eq!(ready, 0, "kill signaled an unrelated numeric PID");
++    Ok(())
++}
 diff --git a/src/child.rs b/src/child.rs
-index 0aec6be..34b159f 100644
+index 0aec6be..b3c09de 100644
 --- a/src/child.rs
 +++ b/src/child.rs
 @@ -1,18 +1,41 @@
@@ -302,7 +435,7 @@ index 0aec6be..34b159f 100644
                  code: 128 + signal as i32,
                  reason: format!("process({program}) received signal {signal}"),
                  exit_code: None,
-@@ -119,6 +145,14 @@ impl fmt::Debug for Output {
+@@ -119,6 +145,15 @@ impl fmt::Debug for Output {
      }
  }
  
@@ -312,12 +445,13 @@ index 0aec6be..34b159f 100644
 +    Running,
 +    SetupFailed(ExitStatus),
 +    Reaped(ExitStatus),
++    ReapedWithoutReport,
 +}
 +
  /// Representation of a running or exited child process.
  ///
  /// A child process is created via the [Command::spawn]. This struct is similar
-@@ -128,10 +162,11 @@ impl fmt::Debug for Output {
+@@ -128,10 +163,11 @@ impl fmt::Debug for Output {
  /// [std::process::Child]: https://doc.rust-lang.org/std/process/struct.Child.html
  pub struct Child {
      pid: Pid,
@@ -331,7 +465,7 @@ index 0aec6be..34b159f 100644
  
      /// Only initialized when using [Stdio::piped()](crate::Stdio::piped()).
      pub stdin: Option<PipeWriter>,
-@@ -156,6 +191,7 @@ impl Child {
+@@ -156,6 +192,7 @@ impl Child {
      #[allow(clippy::too_many_arguments)]
      pub(crate) fn new(
          pid: Pid,
@@ -339,7 +473,7 @@ index 0aec6be..34b159f 100644
          stdin: Option<PipeWriter>,
          stdout: Option<PipeReader>,
          stderr: Option<PipeReader>,
-@@ -168,13 +204,14 @@ impl Child {
+@@ -168,13 +205,14 @@ impl Child {
      ) -> Self {
          Self {
              pid,
@@ -356,7 +490,7 @@ index 0aec6be..34b159f 100644
              #[cfg(feature = "cgroups")]
              cgroup,
              #[cfg(feature = "rustslirp")]
-@@ -187,12 +224,36 @@ impl Child {
+@@ -187,12 +225,36 @@ impl Child {
          self.pid.as_raw() as u32
      }
  
@@ -397,13 +531,32 @@ index 0aec6be..34b159f 100644
              return Ok(());
          }
  
-@@ -213,12 +274,12 @@ impl Child {
+@@ -204,21 +266,28 @@ impl Child {
      ///
+     /// This function will not block the calling thread and will only check to see
+     /// if the child process has exited or not. If the child has exited then on Unix
+-    /// the process ID is reaped. This function is guaranteed to repeatedly return
+-    /// a successful exit status so long as the child has already exited.
++    /// the process ID is reaped. A decoded exit status is cached for later calls.
+     ///
+     /// If the child has exited, then Ok(Some(status)) is returned. If the exit
+     /// status is not available at this time then Ok(None) is returned. If an error
+     /// occurs, then that error is returned.
+     ///
++    /// If reading or decoding the report fails after reaping, this call returns
++    /// that error. Later waits return `ProcessErrorKind::ChildExitStatusGone`
++    /// without another kernel wait. Any acquired workload pidfd remains usable.
++    ///
      /// Note that unlike wait, this function will not attempt to drop stdin.
      pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
 -        if let Some(status) = &self.status {
-+        if let ChildState::Reaped(status) = &self.state {
-             return Ok(Some(status.clone()));
+-            return Ok(Some(status.clone()));
++        match &self.state {
++            ChildState::Reaped(status) => return Ok(Some(status.clone())),
++            ChildState::ReapedWithoutReport => {
++                return Err(ProcessErrorKind::ChildExitStatusGone.into());
++            }
++            ChildState::Running | ChildState::SetupFailed(_) => {}
          }
  
          let flags = Some(WaitPidFlag::WNOHANG);
@@ -412,13 +565,25 @@ index 0aec6be..34b159f 100644
          if let WaitStatus::StillAlive = ws {
              Ok(None)
          } else {
-@@ -236,108 +297,121 @@ impl Child {
+@@ -233,111 +302,134 @@ impl Child {
+     /// waiting. This helps avoid deadlock: it ensures that the child does not
+     /// block waiting for input from the parent, while the parent waits for
+     /// the child to exit.
++    ///
++    /// If reading or decoding the report fails after reaping, this call returns
++    /// that error. Later waits return `ProcessErrorKind::ChildExitStatusGone`
++    /// without another kernel wait. Any acquired workload pidfd remains usable.
      pub fn wait(&mut self) -> Result<ExitStatus> {
          drop(self.stdin.take());
  
 -        if let Some(status) = &self.status {
-+        if let ChildState::Reaped(status) = &self.state {
-             return Ok(status.clone());
+-            return Ok(status.clone());
++        match &self.state {
++            ChildState::Reaped(status) => return Ok(status.clone()),
++            ChildState::ReapedWithoutReport => {
++                return Err(ProcessErrorKind::ChildExitStatusGone.into());
++            }
++            ChildState::Running | ChildState::SetupFailed(_) => {}
          }
  
          let flags = None;
@@ -443,38 +608,41 @@ index 0aec6be..34b159f 100644
 +        }
 +    }
 +
-+    /// Records supervisor reaping while preserving any cached setup failure.
-+    /// Otherwise, decode its final report, including setup failures sent by FIN.
++    /// Records kernel reaping before reading the report, so a read or decode
++    /// error cannot make a recycled supervisor PID look like a running child.
      fn retrieve_exit_status(&mut self, ws: WaitStatus) -> Result<ExitStatus> {
 -        if let WaitStatus::Signaled(_, Signal::SIGKILL, _) = ws {
 -            let reason = "container received signal SIGKILL";
 -            self.status = Some(ExitStatus::new_failure(reason));
 -        }
-+        let status = match &self.state {
-+            ChildState::SetupFailed(status) | ChildState::Reaped(status) => status.clone(),
-+            ChildState::Running => match ws {
-+                WaitStatus::Signaled(_, Signal::SIGKILL, _) => {
-+                    ExitStatus::new_failure("container received signal SIGKILL")
-+                }
-+                _ => self.retrieve_exit_status_internal_process()?,
-+            },
-+        };
- 
+-
 -        if self.status.is_none() {
 -            self.retrieve_exit_status_internal_process()?;
 -        }
 -
 -        self.logging();
 -        drop(self.tmpdir.take());
-+        self.state = ChildState::Reaped(status.clone());
-+        drop(self.status_reader.take());
-+        Self::logging(&status);
++        let previous = std::mem::replace(&mut self.state, ChildState::ReapedWithoutReport);
++        let report = match previous {
++            ChildState::SetupFailed(status) | ChildState::Reaped(status) => Ok(status),
++            ChildState::Running => match ws {
++                WaitStatus::Signaled(_, Signal::SIGKILL, _) => {
++                    Ok(ExitStatus::new_failure("container received signal SIGKILL"))
++                }
++                _ => self.retrieve_exit_status_internal_process(),
++            },
++            ChildState::ReapedWithoutReport => Err(ProcessErrorKind::ChildExitStatusGone.into()),
++        };
  
++        drop(self.status_reader.take());
          #[cfg(feature = "cgroups")]
          drop(self.cgroup.take());
  
 -        let s = self.status.clone();
 -        s.ok_or(Error::ProcessError(ProcessErrorKind::ChildExitStatusGone))
++        let status = report?;
++        self.state = ChildState::Reaped(status.clone());
++        Self::logging(&status);
 +        Ok(status)
      }
  
@@ -608,7 +776,7 @@ index 0aec6be..34b159f 100644
          }
      }
  
-@@ -408,3 +482,6 @@ impl Child {
+@@ -408,3 +500,6 @@ impl Child {
          Ok(())
      }
  }
