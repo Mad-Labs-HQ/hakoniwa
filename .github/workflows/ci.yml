@@ -2,51 +2,66 @@ name: Continuous Integration
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - "hakoniwa/**"
-      - "hakoniwa-cli/**"
-      - "Cargo.*"
+    branches: [main]
   pull_request:
-    branches:
-      - main
-    paths:
-      - "hakoniwa/**"
-      - "hakoniwa-cli/**"
-      - "Cargo.*"
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   check:
     name: Check
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.87.21
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-deny,cargo-hack
-      - name: Run cargo check
+      - name: Check dependencies and feature combinations
         run: |
           cargo deny --all-features --log-level error check
-          cargo hack check --feature-powerset --no-dev-deps
+          cargo hack check --locked --feature-powerset --no-dev-deps
 
   lints:
     name: Lints
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          components: clippy
-      - name: Run cargo clippy
-        run: cargo clippy -- -D warnings
+          persist-credentials: false
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy,rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --locked -- -D warnings
 
   test:
-    name: Test Suite
+    name: Test Suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -55,19 +70,74 @@ jobs:
       - check
       - lints
     steps:
-      - name: DONOT restrict unprivileged user namespaces
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check native architecture and Landlock support
+        env:
+          EXPECTED_ARCH: ${{ matrix.os == 'ubuntu-24.04-arm' && 'aarch64' || 'x86_64' }}
         run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Checkout sources
-        uses: actions/checkout@v7
+          mkdir -p ci-results
+          uname -a | tee ci-results/environment.log
+          git rev-parse HEAD | tee -a ci-results/environment.log
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          cc -std=c11 -Wall -Wextra -Werror -x c -o "$RUNNER_TEMP/check-landlock" - <<'C'
+          /* Check the running kernel before testing filesystem and TCP enforcement.
+           * Linux UAPI headers supply syscall numbers for each native architecture.
+           * A userspace image cannot add Landlock if the kernel lacks boot-time support.
+           */
+          #define _GNU_SOURCE
+          #include <linux/landlock.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <sys/syscall.h>
+          #include <unistd.h>
+
+          int main(void)
+          {
+              const long abi = syscall(SYS_landlock_create_ruleset, NULL, 0,
+                                       LANDLOCK_CREATE_RULESET_VERSION);
+
+              if (abi < 0) {
+                  perror("Landlock ABI query failed");
+                  fputs("CI requires a kernel with Landlock compiled in and enabled at boot.\n",
+                        stderr);
+                  return EXIT_FAILURE;
+              }
+
+              /* TCP bind/connect restrictions require ABI 4. */
+              if (abi < 4) {
+                  fprintf(stderr, "Landlock ABI %ld is too old; CI requires ABI 4 or newer.\n",
+                          abi);
+                  return EXIT_FAILURE;
+              }
+
+              printf("Landlock ABI %ld meets the CI requirement (>= 4).\n", abi);
+              return EXIT_SUCCESS;
+          }
+          C
+          "$RUNNER_TEMP/check-landlock" 2>&1 | tee -a ci-results/environment.log
+      - name: Allow unprivileged namespace creation
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install libseccomp
         run: |
           sudo apt-get update
-          sudo apt install libseccomp-dev
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Run cargo test -p hakoniwa
-        run: cargo test --all-features --all-targets -p hakoniwa -- --nocapture
-      - name: Run cargo test -p hakoniwa-cli
+          sudo apt-get install --no-install-recommends -y libseccomp-dev
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Record toolchain
+        run: '{ rustc -Vv; cargo -V; } | tee -a ci-results/environment.log'
+      - name: Test library with all features
+        run: |
+          timeout 15m cargo test --locked --all-features --all-targets -p hakoniwa -- --nocapture 2>&1 | tee ci-results/hakoniwa.log
+      - name: Test CLI with all features
         if: matrix.os == 'ubuntu-24.04'
-        run: cargo test --all-features --all-targets -p hakoniwa-cli -- --nocapture
+        run: |
+          timeout 10m cargo test --locked --all-features --all-targets -p hakoniwa-cli -- --nocapture 2>&1 | tee ci-results/hakoniwa-cli.log
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: ci-results/
+          retention-days: 7
+          if-no-files-found: warn

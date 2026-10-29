@@ -1,5 +1,7 @@
 # Hakoniwa
 
+[![CI](https://github.com/Mad-Labs-HQ/hakoniwa/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Mad-Labs-HQ/hakoniwa/actions/workflows/ci.yml?query=branch%3Amain)
+
 Process isolation for Linux using namespaces, resource limits, cgroups, landlock and seccomp.
 It works by creating a new, completely empty, mount namespace where the root is
 on a tmpdir, and will be automatically cleaned up when the last process exits.
