@@ -31,7 +31,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-deny,cargo-hack
@@ -51,13 +53,18 @@ jobs:
         with:
           persist-credentials: false
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           components: clippy,rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Install libseccomp
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libseccomp-dev
       - name: Run Clippy
-        run: cargo clippy --locked -- -D warnings
+        run: cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
 
   test:
     name: Test Suite (${{ matrix.os }})
@@ -124,12 +131,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libseccomp-dev
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
       - name: Record toolchain
         run: '{ rustc -Vv; cargo -V; } | tee -a ci-results/environment.log'
       - name: Test library with all features
         run: |
           timeout 15m cargo test --locked --all-features --all-targets -p hakoniwa -- --nocapture 2>&1 | tee ci-results/hakoniwa.log
+      - name: Test library documentation examples
+        run: |
+          timeout 5m cargo test --locked --all-features --doc -p hakoniwa -- --nocapture 2>&1 | tee ci-results/hakoniwa-doctests.log
       - name: Test CLI with all features
         if: matrix.os == 'ubuntu-24.04'
         run: |
