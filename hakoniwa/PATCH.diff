@@ -366,7 +366,7 @@ index 0000000..273ed83
 +    Ok(())
 +}
 diff --git a/src/child.rs b/src/child.rs
-index 0aec6be..b3c09de 100644
+index 0aec6be..e96bb17 100644
 --- a/src/child.rs
 +++ b/src/child.rs
 @@ -1,18 +1,41 @@
@@ -615,13 +615,6 @@ index 0aec6be..b3c09de 100644
 -            let reason = "container received signal SIGKILL";
 -            self.status = Some(ExitStatus::new_failure(reason));
 -        }
--
--        if self.status.is_none() {
--            self.retrieve_exit_status_internal_process()?;
--        }
--
--        self.logging();
--        drop(self.tmpdir.take());
 +        let previous = std::mem::replace(&mut self.state, ChildState::ReapedWithoutReport);
 +        let report = match previous {
 +            ChildState::SetupFailed(status) | ChildState::Reaped(status) => Ok(status),
@@ -634,15 +627,22 @@ index 0aec6be..b3c09de 100644
 +            ChildState::ReapedWithoutReport => Err(ProcessErrorKind::ChildExitStatusGone.into()),
 +        };
  
-+        drop(self.status_reader.take());
-         #[cfg(feature = "cgroups")]
-         drop(self.cgroup.take());
- 
--        let s = self.status.clone();
--        s.ok_or(Error::ProcessError(ProcessErrorKind::ChildExitStatusGone))
+-        if self.status.is_none() {
+-            self.retrieve_exit_status_internal_process()?;
+-        }
+-
+-        self.logging();
+-        drop(self.tmpdir.take());
 +        let status = report?;
 +        self.state = ChildState::Reaped(status.clone());
++        drop(self.status_reader.take());
 +        Self::logging(&status);
+ 
+         #[cfg(feature = "cgroups")]
+         drop(self.cgroup.take());
+-
+-        let s = self.status.clone();
+-        s.ok_or(Error::ProcessError(ProcessErrorKind::ChildExitStatusGone))
 +        Ok(status)
      }
  

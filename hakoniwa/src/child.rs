@@ -352,13 +352,13 @@ impl Child {
             ChildState::ReapedWithoutReport => Err(ProcessErrorKind::ChildExitStatusGone.into()),
         };
 
-        drop(self.status_reader.take());
-        #[cfg(feature = "cgroups")]
-        drop(self.cgroup.take());
-
         let status = report?;
         self.state = ChildState::Reaped(status.clone());
+        drop(self.status_reader.take());
         Self::logging(&status);
+
+        #[cfg(feature = "cgroups")]
+        drop(self.cgroup.take());
         Ok(status)
     }
 
