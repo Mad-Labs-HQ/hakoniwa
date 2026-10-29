@@ -71,6 +71,8 @@ def main() -> None:
         helper = str(output / "target/debug/examples/repair_supervisor")
         for mode in ["fork", "image"]:
             mode_env = {} if mode == "fork" else {"HAKONIWA_TEST_SUPERVISOR": helper}
+            run(f"{mode}-termination-controls", ["cargo", "test", *common,
+                "--test", "termination_repair", "--", "--nocapture"], mode_env)
             run(f"{mode}-ownership-controls", ["cargo", "test", *common,
                 "--test", "ownership_parity_test", "--", "--test-threads=4", "--nocapture"], mode_env)
             run(f"{mode}-setup-reaping", ["cargo", "test", *common,

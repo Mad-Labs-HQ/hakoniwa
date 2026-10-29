@@ -21,8 +21,8 @@ use tempfile::TempDir;
 
 use crate::{Command, ProcPidSmapsRollup, ProcPidStatus, Rusage, error::*};
 
-/// Kernel termination preserved before conversion to a shell-shaped code.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+/// A typed view of the inner process outcome encoded in an exit report.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Termination {
     /// Normal exit status.
     Exited(i32),
@@ -33,16 +33,13 @@ pub enum Termination {
 /// Result of a process after it has terminated.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ExitStatus {
-    /// Actual process termination, absent for container setup failure.
-    pub termination: Option<Termination>,
-
-    /// The exit code of the child process.
+    /// The inner exit code, `128 + signal`, or 125 for container failure.
     pub code: i32,
 
     /// The detailed message of the [code][ExitStatus::code].
     pub reason: String,
 
-    /// The exit code of the internal process.
+    /// The normal inner exit code, absent for signals or an unavailable inner result.
     pub exit_code: Option<i32>,
 
     /// Information about resource usage of the internal process.
@@ -60,13 +57,52 @@ pub struct ExitStatus {
 }
 
 impl ExitStatus {
+    /// Decodes the inner outcome from the existing report fields.
+    ///
+    /// Normal exits have equal `code` and `exit_code`. Signal reports have no
+    /// `exit_code` and encode `128 + signal` in `code`. Container failures use code
+    /// 125 without an `exit_code`, so they carry no observed inner termination.
+    ///
+    /// Returns `None` for missing or inconsistent outcome fields. Diagnostic text
+    /// is not parsed. The view relies on this producer contract; public fields
+    /// cannot authenticate records constructed or changed by callers.
+    ///
+    /// # Examples
+    ///
+    /// These records illustrate the encoding, rather than a kernel observation.
+    ///
+    /// ```
+    /// use hakoniwa::{ExitStatus, Termination};
+    ///
+    /// let exited = ExitStatus {
+    ///     code: 137,
+    ///     reason: String::new(),
+    ///     exit_code: Some(137),
+    ///     rusage: None,
+    ///     proc_pid_smaps_rollup: None,
+    ///     proc_pid_status: None,
+    /// };
+    /// assert_eq!(exited.termination(), Some(Termination::Exited(137)));
+    ///
+    /// let signaled = ExitStatus { exit_code: None, ..exited };
+    /// assert_eq!(signaled.termination(), Some(Termination::Signaled(9)));
+    /// ```
+    pub fn termination(&self) -> Option<Termination> {
+        match (self.code, self.exit_code) {
+            (code, Some(exit)) if code == exit && (0..=255).contains(&exit) => {
+                Some(Termination::Exited(exit))
+            }
+            (code @ 129..=255, None) => Some(Termination::Signaled(code - 128)),
+            _ => None,
+        }
+    }
+
     pub(crate) const SUCCESS: i32 = 0;
     pub(crate) const FAILURE: i32 = 125; // If the Container itself fails.
 
     /// Constructs a new ExitStatus with FAILURE code.
     pub(crate) fn new_failure(reason: &str) -> Self {
         Self {
-            termination: None,
             code: Self::FAILURE,
             reason: reason.to_string(),
             exit_code: None,
@@ -81,7 +117,6 @@ impl ExitStatus {
         let program = command.get_program();
         match *ws {
             WaitStatus::Exited(_, status) => Self {
-                termination: Some(Termination::Exited(status)),
                 code: status,
                 reason: format!("process({program}) exited with code {status}"),
                 exit_code: Some(status),
@@ -90,7 +125,6 @@ impl ExitStatus {
                 proc_pid_status: None,
             },
             WaitStatus::Signaled(_, signal, _) => Self {
-                termination: Some(Termination::Signaled(signal as i32)),
                 code: 128 + signal as i32,
                 reason: format!("process({program}) received signal {signal}"),
                 exit_code: None,
@@ -503,3 +537,6 @@ impl Child {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod termination_tests;

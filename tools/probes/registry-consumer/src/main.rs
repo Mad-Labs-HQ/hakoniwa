@@ -13,7 +13,7 @@ fn main() -> io::Result<()> {
         .command("/bin/true")
         .status()
         .map_err(io::Error::other)?;
-    match status.termination {
+    match status.termination() {
         Some(Termination::Exited(0)) => Ok(()),
         other => Err(io::Error::other(format!(
             "unexpected termination: {other:?}"

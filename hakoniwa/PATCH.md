@@ -29,10 +29,11 @@ its original typed error. Later waits report ChildExitStatusGone without another
 kernel wait. The acquired workload pidfd and rootfs remain owned by Child, and
 kill cannot signal a recycled numeric supervisor PID.
 
-Termination preserves an observed exit or signal before projecting shell codes.
-Exit 137 remains distinct from SIGKILL. Child::kill therefore reports the inner
-signal result instead of a supervisor setup failure. This behavior and the
-added ExitStatus field require upstream compatibility review.
+The typed termination accessor decodes the existing code and exit_code fields.
+Exit 137 remains distinct from SIGKILL without adding a stored field or changing
+the upstream ExitStatus wire layout. Child::kill reports the inner signal result
+instead of a supervisor setup failure. Removing the fork's former field requires
+rebuilding its host and image helper together.
 
 The remount fallback retains requested read-only access while incorporating
 locked source-mount flags. Its native control also requires a writable neighbor.
@@ -62,4 +63,5 @@ local HTTP registry and removes both fork checkout and vendor alternatives.
 No package is published by these checks.
 
 The 1.7.2 vendor tree is an archived baseline. It is not the linked library or
-the current provenance reference. The 1.8.0 drafts remain local and unsubmitted.
+the current provenance reference. Upstream contributions are reviewed separately
+from this integration branch.

@@ -276,7 +276,6 @@ fn reap(child: Pid, command: &Command, container: &Container) -> Result<ExitStat
 
     // Build the exit status of the internal process.
     Ok(ExitStatus {
-        termination: status.termination,
         code: status.code,
         reason: status.reason,
         exit_code: status.exit_code,
