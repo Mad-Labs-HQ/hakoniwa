@@ -1,3 +1,6 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 bitflags::bitflags! {
     /// FS access flags.
     #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
@@ -5,6 +8,23 @@ bitflags::bitflags! {
         const R = 1;
         const W = 1 << 1;
         const X = 1 << 2;
+    }
+}
+
+// Serialized as its bits, for a supervisor started from its own image; bits
+// this build does not know are refused rather than dropped.
+impl serde::Serialize for Access {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.bits(), serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Access {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bits = <u64 as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_bits(bits).ok_or_else(|| {
+            serde::de::Error::custom(format!("unknown landlock fs access bits {bits:#x}"))
+        })
     }
 }
 

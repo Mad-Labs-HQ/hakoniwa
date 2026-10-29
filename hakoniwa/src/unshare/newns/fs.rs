@@ -1,22 +1,25 @@
-#[derive(Clone, Debug)]
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct WriteFile {
     pub(crate) target: String,
     pub(crate) contents: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MakeDir {
     pub(crate) target: String,
     pub(crate) mode: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MakeSymlink {
     pub(crate) original: String,
     pub(crate) link: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Operation {
     WriteFile(WriteFile),
     MakeDir(MakeDir),

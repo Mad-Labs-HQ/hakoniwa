@@ -1,0 +1,1691 @@
+diff --git a/src/cgroups/cpu.rs b/src/cgroups/cpu.rs
+index 52a2dd2..afbfb22 100644
+--- a/src/cgroups/cpu.rs
++++ b/src/cgroups/cpu.rs
+@@ -1,7 +1,10 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use super::error::*;
+ 
+ /// Represents the cgroup subsystems cpu.
+-#[derive(Clone, Default, Debug)]
++#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Cpu {
+     shares: Option<u64>,
+     period: Option<u64>,
+diff --git a/src/cgroups/memory.rs b/src/cgroups/memory.rs
+index 37d4b97..8eebb7e 100644
+--- a/src/cgroups/memory.rs
++++ b/src/cgroups/memory.rs
+@@ -1,7 +1,10 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use super::error::*;
+ 
+ /// Represents the cgroup subsystem memory.
+-#[derive(Clone, Default, Debug)]
++#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Memory {
+     reservation: Option<i64>,
+     limit: Option<i64>,
+diff --git a/src/cgroups/pids.rs b/src/cgroups/pids.rs
+index a34a07f..c5a224a 100644
+--- a/src/cgroups/pids.rs
++++ b/src/cgroups/pids.rs
+@@ -1,7 +1,10 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use super::error::*;
+ 
+ /// Represents the cgroup subsystem pids.
+-#[derive(Clone, Default, Debug)]
++#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Pids {
+     limit: Option<i64>,
+ }
+diff --git a/src/cgroups/resources.rs b/src/cgroups/resources.rs
+index 206fa1a..cb91836 100644
+--- a/src/cgroups/resources.rs
++++ b/src/cgroups/resources.rs
+@@ -1,7 +1,10 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use super::{Cpu, Memory, Pids, error::*};
+ 
+ /// Control groups resources builder.
+-#[derive(Clone, Default, Debug)]
++#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Resources {
+     cpu: Option<Cpu>,
+     memory: Option<Memory>,
+diff --git a/src/child.rs b/src/child.rs
+index 0aec6be..636935f 100644
+--- a/src/child.rs
++++ b/src/child.rs
+@@ -1,18 +1,41 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-06.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Owns the supervisor status and pinned inner process cancellation handle.
++//!
++//! Assumes exclusive reaping. A pidfd stays safe after numeric PID reuse.
++//! The acquired rootfs belongs to Child until disposal. Status decoding alone
++//! does not prove that the caller's pinned inner cleanup has completed.
++
+ use nix::sys::signal::{self, Signal};
+ use nix::sys::wait::{self, WaitPidFlag, WaitStatus};
+ use nix::unistd::Pid;
+ use serde::{Deserialize, Serialize};
+ use std::io::prelude::*;
+ use std::io::{PipeReader, PipeWriter};
++use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+ use std::thread;
+ use std::{fmt, str};
+ use tempfile::TempDir;
+ 
+ use crate::{Command, ProcPidSmapsRollup, ProcPidStatus, Rusage, error::*};
+ 
++/// Kernel termination preserved before conversion to a shell-shaped code.
++#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Termination {
++    /// Normal exit status.
++    Exited(i32),
++    /// Terminating signal.
++    Signaled(i32),
++}
++
+ /// Result of a process after it has terminated.
+ #[derive(Serialize, Deserialize, Clone, Debug)]
+ pub struct ExitStatus {
++    /// Actual process termination, absent for container setup failure.
++    pub termination: Option<Termination>,
++
+     /// The exit code of the child process.
+     pub code: i32,
+ 
+@@ -43,6 +66,7 @@ impl ExitStatus {
+     /// Constructs a new ExitStatus with FAILURE code.
+     pub(crate) fn new_failure(reason: &str) -> Self {
+         Self {
++            termination: None,
+             code: Self::FAILURE,
+             reason: reason.to_string(),
+             exit_code: None,
+@@ -57,6 +81,7 @@ impl ExitStatus {
+         let program = command.get_program();
+         match *ws {
+             WaitStatus::Exited(_, status) => Self {
++                termination: Some(Termination::Exited(status)),
+                 code: status,
+                 reason: format!("process({program}) exited with code {status}"),
+                 exit_code: Some(status),
+@@ -65,6 +90,7 @@ impl ExitStatus {
+                 proc_pid_status: None,
+             },
+             WaitStatus::Signaled(_, signal, _) => Self {
++                termination: Some(Termination::Signaled(signal as i32)),
+                 code: 128 + signal as i32,
+                 reason: format!("process({program}) received signal {signal}"),
+                 exit_code: None,
+@@ -128,10 +154,11 @@ impl fmt::Debug for Output {
+ /// [std::process::Child]: https://doc.rust-lang.org/std/process/struct.Child.html
+ pub struct Child {
+     pid: Pid,
++    inner_pidfd: Option<OwnedFd>,
+     status: Option<ExitStatus>,
+     status_reader: Option<PipeReader>,
+     status_reader_noleading: bool,
+-    tmpdir: Option<TempDir>,
++    _tmpdir: Option<TempDir>,
+ 
+     /// Only initialized when using [Stdio::piped()](crate::Stdio::piped()).
+     pub stdin: Option<PipeWriter>,
+@@ -156,6 +183,7 @@ impl Child {
+     #[allow(clippy::too_many_arguments)]
+     pub(crate) fn new(
+         pid: Pid,
++        inner_pidfd: Option<OwnedFd>,
+         stdin: Option<PipeWriter>,
+         stdout: Option<PipeReader>,
+         stderr: Option<PipeReader>,
+@@ -168,13 +196,14 @@ impl Child {
+     ) -> Self {
+         Self {
+             pid,
++            inner_pidfd,
+             stdin,
+             stdout,
+             stderr,
+             status_reader: Some(status_reader),
+             status_reader_noleading,
+             status,
+-            tmpdir,
++            _tmpdir: tmpdir,
+             #[cfg(feature = "cgroups")]
+             cgroup,
+             #[cfg(feature = "rustslirp")]
+@@ -187,8 +216,31 @@ impl Child {
+         self.pid.as_raw() as u32
+     }
+ 
++    /// Borrow stable cancellation authority for the inner process.
++    ///
++    /// Startup acquisition supplies this descriptor, including when a later
++    /// response fails. It is absent only if acquisition never completed; it
++    /// remains valid after exit and reaping.
++    pub fn inner_pidfd(&self) -> Option<BorrowedFd<'_>> {
++        self.inner_pidfd.as_ref().map(AsFd::as_fd)
++    }
++
++    /// Report rejected setup whose supervisor still owns gated-child cleanup.
++    ///
++    /// This observation is for admission before any wait. A consumed FIN proves
++    /// dependency cleanup finished; a cached host setup error does not.
++    pub fn startup_cleanup_pending(&self) -> bool {
++        self.inner_pidfd.is_none() && self.status.is_some() && !self.status_reader_noleading
++    }
++
+     /// Forces the child process to exit.
+     pub fn kill(&mut self) -> Result<()> {
++        if let Some(descriptor) = self.inner_pidfd() {
++            return crate::startup::stop(descriptor)
++                .map_err(ProcessErrorKind::StdIoError)
++                .map_err(Into::into);
++        }
++
+         // If we've already waited on this process then the pid can be recycled
+         // and used for another process, and we probably shouldn't be killing
+         // random processes, so return Ok because the process has exited already.
+@@ -257,7 +309,6 @@ impl Child {
+         }
+ 
+         self.logging();
+-        drop(self.tmpdir.take());
+ 
+         #[cfg(feature = "cgroups")]
+         drop(self.cgroup.take());
+diff --git a/src/command.rs b/src/command.rs
+index 2256594..df8b74b 100644
+--- a/src/command.rs
++++ b/src/command.rs
+@@ -1,13 +1,26 @@
+-use nix::sys::signal::{self, Signal};
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-28.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Builds native processes and accepts their gated startup identities.
++//!
++//! Assumes exclusive child reaping. Setup failures remain owned until wait.
++//! The supervisor is a fork of the caller, or a program started from its own
++//! image ([`Supervisor`]); either way it is the caller's direct child, and the
++//! startup pipes it is given are the same.
++
++use nix::sys::signal::{Signal, kill};
+ use nix::unistd::{self, ForkResult, Pid};
+ use std::collections::HashMap;
+ use std::fs;
+ use std::io::prelude::*;
+ use std::io::{PipeReader, PipeWriter, pipe};
++use std::os::fd::AsRawFd;
+ use std::path::{Path, PathBuf};
+ use std::time::{SystemTime, UNIX_EPOCH};
+ use tempfile::TempDir;
+ 
++use crate::supervisor::{Frame, Supervisor};
+ use crate::{Child, Container, ExitStatus, Namespace, Output, Stdio, error::*};
+ 
+ /// Process builder, providing fine-grained control over how a new process
+@@ -30,6 +43,7 @@ pub struct Command {
+     stdout: Option<Stdio>,
+     stderr: Option<Stdio>,
+     pub(crate) wait_timeout: Option<u64>,
++    supervisor: Supervisor,
+     pub(crate) runtime_mount_oldproc: String,
+     pub(crate) runtime_rootdir_abspath: PathBuf,
+     #[cfg(feature = "cgroups")]
+@@ -53,6 +67,7 @@ impl Command {
+             stdout: None,
+             stderr: None,
+             wait_timeout: None,
++            supervisor: Supervisor::Fork,
+             runtime_mount_oldproc: String::new(),
+             runtime_rootdir_abspath: PathBuf::new(),
+             #[cfg(feature = "cgroups")]
+@@ -78,6 +93,7 @@ impl Command {
+             stdout: None,
+             stderr: None,
+             wait_timeout: None,
++            supervisor: Supervisor::Fork,
+             runtime_mount_oldproc: String::new(),
+             runtime_rootdir_abspath: PathBuf::new(),
+             #[cfg(feature = "cgroups")]
+@@ -136,6 +152,13 @@ impl Command {
+         self
+     }
+ 
++    /// Sets how the supervisor process is started: a fork of this process
++    /// (the default, as upstream), or a program started from its own image.
++    pub fn supervisor(&mut self, supervisor: Supervisor) -> &mut Self {
++        self.supervisor = supervisor;
++        self
++    }
++
+     /// Configuration for the child process’s standard input (stdin) handle.
+     ///
+     /// Defaults to [inherit] when used with [spawn] or [status], and defaults
+@@ -222,77 +245,153 @@ impl Command {
+         let mut pipe_a = pipe().map_err(ProcessErrorKind::StdIoError)?;
+         let mut pipe_z = pipe().map_err(ProcessErrorKind::StdIoError)?;
+ 
+-        match unsafe { unistd::fork() } {
+-            Ok(ForkResult::Parent { child, .. }) => {
+-                drop(stdin_reader);
+-                drop(stdout_writer);
+-                drop(stderr_writer);
+-                drop(pipe_a.1);
+-                drop(pipe_z.0);
+-
+-                let mut noleading = false;
+-                let mut status = None;
+-                let r = self.mainp_setup(&mut pipe_a.0, &mut pipe_z.1, child);
+-                match r {
+-                    // All goes well.
+-                    Ok(0) => {
+-                        // ;
+-                    }
+-                    // The child process exited early due to some errors.
+-                    Ok(1) => {
+-                        noleading = true;
+-                    }
+-                    // Unreachable.
+-                    Ok(_) => {
+-                        unreachable!("Command::spawn_imp");
+-                    }
+-                    // The main process setup failed due to:
+-                    //
+-                    //  - SetupUGidmapFailed: uid range not allowed, etc.
+-                    //  - SetupNetworkFailed: command pasta not found, etc.
+-                    //  - StdIoError: failed to write to pipe cuz the child process force killed by taskmgr.
+-                    Err(e) => {
+-                        _ = signal::kill(child, Signal::SIGKILL);
+-                        status = Some(ExitStatus::new_failure(&e.to_string()));
+-                    }
+-                };
+-
+-                drop(pipe_z.1);
+-                Ok(Child::new(
+-                    child,
+-                    stdin_writer.and_then(|e| e.into_pipe_writer()),
+-                    stdout_reader.and_then(|e| e.into_pipe_reader()),
+-                    stderr_reader.and_then(|e| e.into_pipe_reader()),
+-                    pipe_a.0,
+-                    noleading,
+-                    status,
+-                    tmpdir,
+-                    #[cfg(feature = "cgroups")]
+-                    self.runtime_cgroup.take(),
+-                    #[cfg(feature = "rustslirp")]
+-                    self.runtime_rustslirp_tapfd.take(),
+-                ))
++        let (child, frame) = match &self.supervisor {
++            Supervisor::Fork => match unsafe { unistd::fork() } {
++                Ok(ForkResult::Parent { child, .. }) => (child, None),
++                Ok(ForkResult::Child) => {
++                    tmpdir.map(|dir| dir.keep());
++                    drop(stdin_writer);
++                    drop(stdout_reader);
++                    drop(stderr_reader);
++                    drop(pipe_a.0);
++                    drop(pipe_z.1);
++                    crate::runc::exec(
++                        self,
++                        &self.container,
++                        stdin_reader,
++                        stdout_writer,
++                        stderr_writer,
++                        pipe_z.0,
++                        pipe_a.1,
++                    );
++                    unreachable!("Command::spawn_imp");
++                }
++                Err(err) => Err(ProcessErrorKind::NixError(err))?,
++            },
++            Supervisor::Image(image) => {
++                let frame = self.frame()?.encode()?;
++                let stdio = [
++                    stdin_reader.as_ref().map(AsRawFd::as_raw_fd),
++                    stdout_writer.as_ref().map(AsRawFd::as_raw_fd),
++                    stderr_writer.as_ref().map(AsRawFd::as_raw_fd),
++                ];
++                let child = crate::supervisor::spawn(
++                    image,
++                    stdio,
++                    pipe_z.0.as_raw_fd(),
++                    pipe_a.1.as_raw_fd(),
++                )?;
++                (child, Some(frame))
+             }
+-            Ok(ForkResult::Child) => {
+-                tmpdir.map(|dir| dir.keep());
+-                drop(stdin_writer);
+-                drop(stdout_reader);
+-                drop(stderr_reader);
+-                drop(pipe_a.0);
+-                drop(pipe_z.1);
+-                crate::runc::exec(
+-                    self,
+-                    &self.container,
+-                    stdin_reader,
+-                    stdout_writer,
+-                    stderr_writer,
+-                    pipe_z.0,
+-                    pipe_a.1,
+-                );
+-                unreachable!("Command::spawn_imp");
+-            }
+-            Err(err) => Err(ProcessErrorKind::NixError(err))?,
++        };
++
++        drop(stdin_reader);
++        drop(stdout_writer);
++        drop(stderr_writer);
++        drop(pipe_a.1);
++        drop(pipe_z.0);
++
++        // Written only once this process holds no reader of the control pipe:
++        // a supervisor that exits or refuses before taking the whole frame
++        // then breaks the write instead of blocking it forever. Killed here,
++        // it fails the setup read below; the returned child carries that
++        // failure, and its caller reaps the supervisor by a kernel wait,
++        // which a cached status does not do.
++        if let Some(frame) = frame
++            && pipe_z.1.write_all(&frame).is_err()
++        {
++            let _ = kill(child, Signal::SIGKILL);
+         }
++
++        let mut noleading = false;
++        let mut status = None;
++        let mut inner_pidfd = None;
++        let r = self.mainp_setup(&mut pipe_a.0, &mut pipe_z.1, child);
++        match r {
++            Ok(crate::startup::Setup::Ready(descriptor)) => {
++                inner_pidfd = Some(descriptor);
++            }
++            Ok(crate::startup::Setup::Exited) => {
++                noleading = true;
++            }
++            Ok(crate::startup::Setup::Failed { descriptor, error }) => {
++                inner_pidfd = Some(descriptor);
++                status = Some(ExitStatus::new_failure(&error.to_string()));
++            }
++            // The main process setup failed due to:
++            //
++            //  - SetupUGidmapFailed: uid range not allowed, etc.
++            //  - SetupNetworkFailed: command pasta not found, etc.
++            //  - StdIoError: failed to write to pipe cuz the child process force killed by taskmgr.
++            Err(e) => {
++                // Closing the control writer asks the supervisor to
++                // kill and reap its gated inner child before it exits.
++                status = Some(ExitStatus::new_failure(&e.to_string()));
++            }
++        };
++
++        drop(pipe_z.1);
++        Ok(Child::new(
++            child,
++            inner_pidfd,
++            stdin_writer.and_then(|e| e.into_pipe_writer()),
++            stdout_reader.and_then(|e| e.into_pipe_reader()),
++            stderr_reader.and_then(|e| e.into_pipe_reader()),
++            pipe_a.0,
++            noleading,
++            status,
++            tmpdir,
++            #[cfg(feature = "cgroups")]
++            self.runtime_cgroup.take(),
++            #[cfg(feature = "rustslirp")]
++            self.runtime_rustslirp_tapfd.take(),
++        ))
++    }
++
++    /// What a supervisor image needs of this command, as one frame. A command
++    /// that runs a closure has none: a closure cannot leave this process.
++    fn frame(&self) -> Result<Frame> {
++        if self.program_closure.is_some() {
++            Err(ProcessErrorKind::StdIoError(std::io::Error::other(
++                "a closure command cannot run under a supervisor image",
++            )))?;
++        }
++
++        Ok(Frame {
++            container: self.container.clone(),
++            program: self.program.clone(),
++            args: self.args.clone(),
++            envs: self.envs.clone(),
++            dir: self.dir.clone(),
++            wait_timeout: self.wait_timeout,
++            runtime_mount_oldproc: self.runtime_mount_oldproc.clone(),
++            runtime_rootdir_abspath: self.runtime_rootdir_abspath.clone(),
++        })
++    }
++
++    /// Runs this process as the supervisor of the command `frame` describes,
++    /// from the startup pipes on, as a forked supervisor does: its standard
++    /// streams are already in place. Never returns.
++    pub(crate) fn supervise(frame: Frame, control: PipeReader, status: PipeWriter) -> ! {
++        let command = Self {
++            args: frame.args,
++            envs: frame.envs,
++            dir: frame.dir,
++            wait_timeout: frame.wait_timeout,
++            runtime_mount_oldproc: frame.runtime_mount_oldproc,
++            runtime_rootdir_abspath: frame.runtime_rootdir_abspath,
++            ..Self::new(&frame.program, frame.container)
++        };
++        crate::runc::exec(
++            &command,
++            &command.container,
++            None,
++            None,
++            None,
++            control,
++            status,
++        );
++        unreachable!("Command::supervise")
+     }
+ 
+     /// Logging.
+@@ -427,7 +526,7 @@ impl Command {
+         reader: &mut PipeReader,
+         writer: &mut PipeWriter,
+         child: Pid,
+-    ) -> Result<u8> {
++    ) -> Result<crate::startup::Setup> {
+         loop {
+             // Receive the child process's request.
+             let mut request = [0];
+@@ -437,13 +536,14 @@ impl Command {
+ 
+             // The child process exited early due to some errors, so there is no need to do any setup.
+             if request[0] == crate::runc::FIN {
+-                return Ok(1);
++                return Ok(crate::startup::Setup::Exited);
+             }
+ 
+-            // Setup completed.
+-            if request[0] == crate::runc::SETUP_SUCCESS {
+-                return Ok(0);
+-            };
++            if request[0] == crate::runc::SETUP_CHILD {
++                return crate::startup::accept(reader, writer)
++                    .map_err(ProcessErrorKind::StdIoError)
++                    .map_err(Into::into);
++            }
+ 
+             // Setup [ug]idmap.
+             if request[0] & crate::runc::SETUP_UGIDMAP == crate::runc::SETUP_UGIDMAP {
+diff --git a/src/container.rs b/src/container.rs
+index 02a96b8..db17509 100644
+--- a/src/container.rs
++++ b/src/container.rs
+@@ -1,3 +1,6 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use nix::sched::CloneFlags;
+ use nix::unistd::{Gid, Uid};
+ use std::collections::{HashMap, HashSet};
+@@ -40,7 +43,7 @@ use crate::{
+ ///
+ /// [bindmount_ro]: Container::bindmount_ro
+ /// [bindmount_rw]: Container::bindmount_rw
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Container {
+     pub(crate) namespaces: HashSet<Namespace>,
+     pub(crate) rootdir: Option<PathBuf>,
+diff --git a/src/landlock/fs/access.rs b/src/landlock/fs/access.rs
+index 822f408..47586ec 100644
+--- a/src/landlock/fs/access.rs
++++ b/src/landlock/fs/access.rs
+@@ -1,3 +1,6 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ bitflags::bitflags! {
+     /// FS access flags.
+     #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+@@ -8,6 +11,23 @@ bitflags::bitflags! {
+     }
+ }
+ 
++// Serialized as its bits, for a supervisor started from its own image; bits
++// this build does not know are refused rather than dropped.
++impl serde::Serialize for Access {
++    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
++        serde::Serialize::serialize(&self.bits(), serializer)
++    }
++}
++
++impl<'de> serde::Deserialize<'de> for Access {
++    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
++        let bits = <u64 as serde::Deserialize>::deserialize(deserializer)?;
++        Self::from_bits(bits).ok_or_else(|| {
++            serde::de::Error::custom(format!("unknown landlock fs access bits {bits:#x}"))
++        })
++    }
++}
++
+ impl std::fmt::Display for Access {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         let mut str = "".to_string();
+diff --git a/src/landlock/fs/rule.rs b/src/landlock/fs/rule.rs
+index 80bb261..a2458b8 100644
+--- a/src/landlock/fs/rule.rs
++++ b/src/landlock/fs/rule.rs
+@@ -1,5 +1,8 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ /// Represents a FS rule.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Rule {
+     pub(crate) path: String,
+     pub(crate) mode: super::Access,
+diff --git a/src/landlock/net/access.rs b/src/landlock/net/access.rs
+index 384490b..c5006a2 100644
+--- a/src/landlock/net/access.rs
++++ b/src/landlock/net/access.rs
+@@ -1,3 +1,6 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ bitflags::bitflags! {
+     /// NET access flags.
+     #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+@@ -7,6 +10,23 @@ bitflags::bitflags! {
+     }
+ }
+ 
++// Serialized as its bits, for a supervisor started from its own image; bits
++// this build does not know are refused rather than dropped.
++impl serde::Serialize for Access {
++    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
++        serde::Serialize::serialize(&self.bits(), serializer)
++    }
++}
++
++impl<'de> serde::Deserialize<'de> for Access {
++    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
++        let bits = <u64 as serde::Deserialize>::deserialize(deserializer)?;
++        Self::from_bits(bits).ok_or_else(|| {
++            serde::de::Error::custom(format!("unknown landlock net access bits {bits:#x}"))
++        })
++    }
++}
++
+ impl std::fmt::Display for Access {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         let mut str = vec![];
+diff --git a/src/landlock/net/rule.rs b/src/landlock/net/rule.rs
+index 93be28b..08740dc 100644
+--- a/src/landlock/net/rule.rs
++++ b/src/landlock/net/rule.rs
+@@ -1,5 +1,8 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ /// Represents a NET rule.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Rule {
+     pub(crate) port: u16,
+     pub(crate) access: super::Access,
+diff --git a/src/landlock/ruleset.rs b/src/landlock/ruleset.rs
+index 48c5cc1..1b59989 100644
+--- a/src/landlock/ruleset.rs
++++ b/src/landlock/ruleset.rs
+@@ -1,3 +1,6 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use std::collections::HashMap;
+ use std::collections::hash_map::Entry;
+ 
+@@ -5,7 +8,7 @@ use super::{FsAccess, FsRule, NetAccess, NetRule};
+ 
+ /// Resource type.
+ #[allow(non_camel_case_types)]
+-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum Resource {
+     FS,
+     NET_TCP_BIND,
+@@ -24,14 +27,14 @@ impl std::fmt::Display for Resource {
+ }
+ 
+ /// Compatibility mode.
+-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum CompatMode {
+     Enforce,
+     Relax,
+ }
+ 
+ /// Landlock ruleset builder.
+-#[derive(Clone, Default, Debug)]
++#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Ruleset {
+     pub(crate) restrictions: HashMap<Resource, CompatMode>,
+     pub(crate) fs_rules: HashMap<String, FsRule>,
+diff --git a/src/lib.rs b/src/lib.rs
+index 29e7f38..998abc7 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,7 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-28.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
+ //! Process isolation for Linux using namespaces, resource limits, cgroups, landlock
+ //! and seccomp. It works by creating a new, completely empty, mount namespace where
+ //! the root is on a tmpdir, and will be automatically cleaned up when the last
+@@ -34,12 +38,13 @@ mod rlimit;
+ mod runc;
+ mod runctl;
+ mod stdio;
++mod supervisor;
+ mod unshare;
+ 
+ use etcfs::{GroupFile, PasswdFile};
+ use unshare::{FsOperation, IdMap, Mount};
+ 
+-pub use child::{Child, ExitStatus, Output};
++pub use child::{Child, ExitStatus, Output, Termination};
+ pub use command::Command;
+ pub use container::Container;
+ pub use error::{Error, Result};
+@@ -47,6 +52,7 @@ pub use metric::{ProcPidSmapsRollup, ProcPidStatus, Rusage};
+ pub use rlimit::Rlimit;
+ pub use runctl::Runctl;
+ pub use stdio::Stdio;
++pub use supervisor::{SUPERVISOR_FINGERPRINT, SUPERVISOR_REFUSAL, Supervisor, supervise};
+ pub use unshare::{MountOptions, Namespace, Network, Pasta};
+ 
+ #[cfg(feature = "cgroups")]
+@@ -66,3 +72,5 @@ pub use unshare::RustSlirpMode;
+ 
+ #[cfg(feature = "rustslirp")]
+ pub use unshare::RustSlirpGateway;
++
++mod startup;
+diff --git a/src/rlimit.rs b/src/rlimit.rs
+index 144a58e..2599ed3 100644
+--- a/src/rlimit.rs
++++ b/src/rlimit.rs
+@@ -1,9 +1,12 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use nix::sys::resource::Resource;
+ 
+ /// Resource limit types.
+ ///
+ /// [getrlimit]: https://man7.org/linux/man-pages/man2/.2.html
+-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum Rlimit {
+     As,
+     Core,
+diff --git a/src/runc.rs b/src/runc.rs
+index 67c2f63..75f3d80 100644
+--- a/src/runc.rs
++++ b/src/runc.rs
+@@ -1,3 +1,12 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Sets up native isolation, gates the inner process, and reports its status.
++//!
++//! Assumes host setup exclusively pins the unreaped inner PID before release.
++//! User code cannot run if either startup control pipe closes prematurely.
++
+ mod error;
+ mod notify;
+ mod rlimit;
+@@ -44,6 +53,7 @@ pub(crate) const FIN: u8 = 0;
+ pub(crate) const SETUP_UGIDMAP: u8 = 1;
+ pub(crate) const SETUP_NETWORK: u8 = 1 << 1;
+ pub(crate) const SETUP_CGROUPS: u8 = 1 << 2;
++pub(crate) const SETUP_CHILD: u8 = 1 << 3;
+ pub(crate) const SETUP_SUCCESS: u8 = 1 << 7;
+ 
+ pub(crate) fn exec(
+@@ -69,6 +79,18 @@ pub(crate) fn exec(
+         Err(err) => ExitStatus::new_failure(&err.to_string()),
+     };
+ 
++    finish(status, writer_opt.expect("writer is some"))
++}
++
++/// Reports `reason` as the run's failure on the status `writer`, as a
++/// supervisor that could not run its command, and exits.
++pub(crate) fn fail(writer: PipeWriter, reason: &str) -> ! {
++    finish(ExitStatus::new_failure(reason), writer)
++}
++
++/// Writes FIN and `status` on the status `writer` for the host, then exits
++/// with the status's code.
++fn finish(status: ExitStatus, mut writer: PipeWriter) -> ! {
+     let encoded: Vec<u8> = match postcard::to_allocvec(&status) {
+         Ok(val) => val,
+         Err(_) => process_exit_with_failure!(),
+@@ -76,7 +98,6 @@ pub(crate) fn exec(
+ 
+     // Assume that the encoded message will not exceed the capacity of the pipe
+     // buffer (usually 65,536 bytes), so the writer will not be blocked.
+-    let mut writer = writer_opt.expect("writer is some");
+     match writer.write_all(&[FIN]) {
+         Ok(_) => {}
+         Err(_) => process_exit_with_failure!(),
+@@ -125,25 +146,83 @@ fn exec_imp(
+ 
+     // Notify the main process to setup [ug]idmap, network, cgroups, etc.
+     notify::notify_mainp_setup(container, &reader, writer_ref)?;
+-    drop(reader);
+-
+     // Mount rootfs.
+     unshare::newns(command, container)?;
+ 
+     // Fork the specified program as a child process rather than running it
+     // directly. This is useful when creating a new PID namespace.
++    let (release_reader, release_writer) = std::io::pipe()?;
++
+     match sys::fork()? {
+         ForkResult::Parent { child, .. } => {
+-            notify::notify_mainp_setup_success(writer_ref)?;
++            drop(release_reader);
++            admit_inner(child, reader, writer_ref, release_writer)?;
+             reap(child, command, container)
+         }
+-        ForkResult::Child => match spawn(command, container, writer) {
+-            Ok(_) => unreachable!("runc::exec_imp"),
+-            Err(err) => process_exit_with_failure!(err),
+-        },
++        ForkResult::Child => {
++            drop(reader);
++            drop(release_writer);
++            match spawn(command, container, writer, release_reader) {
++                Ok(_) => unreachable!("runc::exec_imp"),
++                Err(err) => process_exit_with_failure!(err),
++            }
++        }
+     }
+ }
+ 
++/// Advertise an exclusively owned PID and release it only after host pinning.
++///
++/// Errors kill and reap the still-owned inner process. The supervisor cannot
++/// recycle that PID while the host is acquiring its descriptor.
++fn admit_inner(
++    child: Pid,
++    mut host: PipeReader,
++    mut status: &PipeWriter,
++    mut release: PipeWriter,
++) -> Result<()> {
++    let accepted = (|| -> Result<()> {
++        status.write_all(&[SETUP_CHILD])?;
++        status.write_all(&child.as_raw().to_le_bytes())?;
++        let mut acknowledgment = [0];
++        host.read_exact(&mut acknowledgment)?;
++
++        if acknowledgment != [1] {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidData,
++                "invalid inner acquisition acknowledgment",
++            )
++            .into());
++        }
++
++        release.write_all(&[1])?;
++        drop(release);
++        notify::notify_mainp_setup_success(status)
++    })();
++
++    if accepted.is_err() {
++        // The child remains exclusively owned and unreaped in this branch.
++        let _ = nix::sys::signal::kill(child, Signal::SIGKILL);
++
++        loop {
++            match nix::sys::wait::waitpid(child, None) {
++                Err(nix::errno::Errno::EINTR) => continue,
++                Ok(
++                    nix::sys::wait::WaitStatus::Exited(..)
++                    | nix::sys::wait::WaitStatus::Signaled(..),
++                )
++                | Err(nix::errno::Errno::ECHILD) => break,
++                Ok(_) => continue,
++                Err(error) => {
++                    log::warn!("failed to reap rejected inner process: {error}");
++                    break;
++                }
++            }
++        }
++    }
++
++    accepted
++}
++
+ fn reap(child: Pid, command: &Command, container: &Container) -> Result<ExitStatus> {
+     // Close unused FDs.
+     sys::close_stdin()?;
+@@ -197,6 +276,7 @@ fn reap(child: Pid, command: &Command, container: &Container) -> Result<ExitStat
+ 
+     // Build the exit status of the internal process.
+     Ok(ExitStatus {
++        termination: status.termination,
+         code: status.code,
+         reason: status.reason,
+         exit_code: status.exit_code,
+@@ -240,9 +320,24 @@ fn reap_proc_status(pid: Pid, container: &Container) -> Result<Option<ProcPidSta
+     Ok(ProcPidStatus::from_procfs_status(status))
+ }
+ 
+-fn spawn(command: &Command, container: &Container, writer: &mut Option<PipeWriter>) -> Result<()> {
++/// Wait for host acquisition before configuring and executing the inner process.
++fn spawn(
++    command: &Command,
++    container: &Container,
++    writer: &mut Option<PipeWriter>,
++    mut release: PipeReader,
++) -> Result<()> {
+     // Close FDs.
+     drop(writer.take());
++    let mut acknowledgment = [0];
++    release.read_exact(&mut acknowledgment)?;
++    drop(release);
++
++    if acknowledgment != [1] {
++        return Err(
++            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid inner release").into(),
++        );
++    }
+ 
+     // Die with parent.
+     sys::set_pdeathsig(Signal::SIGKILL)?;
+diff --git a/src/runc/landlock.rs b/src/runc/landlock.rs
+index d54d9a6..f156ddb 100644
+--- a/src/runc/landlock.rs
++++ b/src/runc/landlock.rs
+@@ -1,3 +1,11 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-06.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Applies the configured Landlock rules before inner process execution.
++//!
++//! Assumes filesystem rules name accessible paths and the kernel supports them.
++
+ use landlock::{
+     ABI as LandlockABI, Access as LandlockAccess, AccessFs as LandlockAccessFs,
+     AccessNet as LandlockAccessNet, BitFlags as LandlockBitFlags,
+diff --git a/src/runc/unshare.rs b/src/runc/unshare.rs
+index 132ae27..8133af2 100644
+--- a/src/runc/unshare.rs
++++ b/src/runc/unshare.rs
+@@ -1,3 +1,7 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-06.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
+ use super::error::*;
+ use super::sys::{self, FsFlags, MsFlags, PathBuf};
+ use crate::{
+@@ -271,8 +275,9 @@ fn apply_fs_operations(container: &Container) -> Result<()> {
+ //
+ // [moby#getUnprivilegedMountFlags]: https://github.com/moby/moby/blob/94d3ad69cc598b5a8eb8a643d6999375953512e8/daemon/oci_linux.go#L435
+ fn unprivileged_mount_flags(path: &str, mut flags: MsFlags) -> Result<MsFlags> {
++    // A caller may strengthen a writable source to read-only. Preserve that
++    // request while inheriting flags locked by the source mount.
+     for flag in [
+-        MsFlags::MS_RDONLY,
+         MsFlags::MS_NOSUID,
+         MsFlags::MS_NODEV,
+         MsFlags::MS_NOEXEC,
+diff --git a/src/runctl.rs b/src/runctl.rs
+index 7e2c351..58e0d1b 100644
+--- a/src/runctl.rs
++++ b/src/runctl.rs
+@@ -1,5 +1,8 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ /// Manipulates various aspects of the behavior of the container.
+-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum Runctl {
+     /// Allow the internal process to gain more privileges than its parent
+     /// process. Aka do not set the no_new_privs bit.
+diff --git a/src/seccomp/action.rs b/src/seccomp/action.rs
+index cb8ca4d..a5a24cf 100644
+--- a/src/seccomp/action.rs
++++ b/src/seccomp/action.rs
+@@ -1,5 +1,8 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ /// Represents an action to be taken on a filter rule.
+-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum Action {
+     Allow,
+     Errno(i32),
+diff --git a/src/seccomp/arch.rs b/src/seccomp/arch.rs
+index 44d0b9c..1397b0d 100644
+--- a/src/seccomp/arch.rs
++++ b/src/seccomp/arch.rs
+@@ -1,5 +1,8 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ /// Represents a CPU architecture.
+-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum Arch {
+     Native,
+     X86,
+diff --git a/src/seccomp/argcmp.rs b/src/seccomp/argcmp.rs
+index 36cdabd..8449c3b 100644
+--- a/src/seccomp/argcmp.rs
++++ b/src/seccomp/argcmp.rs
+@@ -1,5 +1,8 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ /// Represents a comparison operator which can be used in an ArgCmp.
+-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum ArgCmpOp {
+     Ne,
+     Lt,
+@@ -11,7 +14,7 @@ pub enum ArgCmpOp {
+ }
+ 
+ /// Represents an argument comparison rule.
+-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct ArgCmp {
+     pub(crate) arg: u32,
+     pub(crate) op: ArgCmpOp,
+diff --git a/src/seccomp/filter.rs b/src/seccomp/filter.rs
+index 2c4fbf0..744c8c1 100644
+--- a/src/seccomp/filter.rs
++++ b/src/seccomp/filter.rs
+@@ -1,3 +1,6 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use std::collections::HashSet;
+ 
+ use super::{Action, Arch, ArgCmp, Rule};
+@@ -5,7 +8,7 @@ use super::{Action, Arch, ArgCmp, Rule};
+ /// Represents a filter that allows one to configure actions to take on matched
+ /// syscalls and furthermore also allows matching on values passed as
+ /// arguments to syscalls.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Filter {
+     pub(crate) default_action: Action,
+     pub(crate) architectures: HashSet<Arch>,
+diff --git a/src/seccomp/rule.rs b/src/seccomp/rule.rs
+index d6353e8..607cd85 100644
+--- a/src/seccomp/rule.rs
++++ b/src/seccomp/rule.rs
+@@ -1,7 +1,10 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use super::{Action, ArgCmp};
+ 
+ /// Represents a filter rule.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Rule {
+     pub action: Action,
+     pub sysname: String,
+diff --git a/src/startup.rs b/src/startup.rs
+new file mode 100644
+index 0000000..93df7b8
+--- /dev/null
++++ b/src/startup.rs
+@@ -0,0 +1,104 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-06.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Pins the inner process before the supervisor releases its startup gate.
++//!
++//! Assumes the supervisor exclusively owns the unreaped inner PID in the host
++//! PID namespace. The host must not install a foreign reaper or SIGCHLD ignore.
++//! A closed gate prevents user code from running even when parent-death setup
++//! has not happened. Numeric PIDs are used only during that ownership interval.
++
++use std::io::{self, Read, Write};
++use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
++
++/// A completed startup carries stable cancellation authority over the inner PID.
++#[derive(Debug)]
++pub(crate) enum Setup {
++    Exited,
++    Ready(OwnedFd),
++    Failed {
++        descriptor: OwnedFd,
++        error: io::Error,
++    },
++}
++
++/// Acquire stable identity while the supervisor has not reaped or released it.
++pub(crate) fn acquire(pid: i32) -> io::Result<OwnedFd> {
++    // SAFETY: pidfd_open takes an owned unreaped PID and flags, with no pointers.
++    let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
++
++    if descriptor < 0 {
++        return Err(io::Error::last_os_error());
++    }
++
++    let descriptor = i32::try_from(descriptor).map_err(io::Error::other)?;
++    // SAFETY: the successful syscall returned a fresh descriptor owned here.
++    Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
++}
++
++/// Pin the gated inner process and acknowledge only after acquisition succeeds.
++pub(crate) fn accept(reader: &mut impl Read, writer: &mut impl Write) -> io::Result<Setup> {
++    let mut encoded = [0; 4];
++    reader.read_exact(&mut encoded)?;
++    let pid = i32::from_le_bytes(encoded);
++
++    if pid <= 0 {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidData,
++            "invalid inner PID",
++        ));
++    }
++
++    let descriptor = acquire(pid)?;
++    let response = (|| -> io::Result<u8> {
++        writer.write_all(&[1])?;
++        let mut completed = [0];
++        reader.read_exact(&mut completed)?;
++        Ok(completed[0])
++    })();
++
++    match response {
++        Ok(crate::runc::SETUP_SUCCESS) => Ok(Setup::Ready(descriptor)),
++        response => {
++            let error = response.err().unwrap_or_else(|| {
++                io::Error::new(io::ErrorKind::InvalidData, "inner startup was rejected")
++            });
++
++            // A user logger can panic. Keep the acquired descriptor available
++            // to Child even when stopping fails; the native owner observes it.
++            let _ = stop(descriptor.as_fd());
++
++            // A failed final response may follow release. Carry authority into
++            // Child even when SIGKILL fails; a stop request cannot prove exit.
++            Ok(Setup::Failed { descriptor, error })
++        }
++    }
++}
++
++/// Deliver SIGKILL through a pinned identity, including after the PID exits.
++pub(crate) fn stop(descriptor: BorrowedFd<'_>) -> io::Result<()> {
++    // SAFETY: the borrowed pidfd stays open. Null siginfo requests ordinary
++    // signal delivery and no userspace memory is accessed.
++    let result = unsafe {
++        libc::syscall(
++            libc::SYS_pidfd_send_signal,
++            descriptor.as_raw_fd(),
++            libc::SIGKILL,
++            std::ptr::null::<libc::siginfo_t>(),
++            0,
++        )
++    };
++
++    match result {
++        0 => Ok(()),
++        _ => {
++            let error = io::Error::last_os_error();
++
++            match error.raw_os_error() {
++                Some(libc::ESRCH) => Ok(()),
++                _ => Err(error),
++            }
++        }
++    }
++}
+diff --git a/src/supervisor.rs b/src/supervisor.rs
+new file mode 100644
+index 0000000..80079af
+--- /dev/null
++++ b/src/supervisor.rs
+@@ -0,0 +1,315 @@
++//! Modification notice: Mad Labs, Inc added this file; changes recorded through
++//! 2026-10-28.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Starts a command's supervisor from its own program image instead of a fork
++//! of the calling process, and runs as that supervisor.
++//!
++//! A forked supervisor lives for the whole run as a copy-on-write image of the
++//! caller, and every page the caller writes afterwards is duplicated into it,
++//! so a large busy host pays its own size again per live run. A supervisor
++//! started from [`Supervisor::Image`] holds only that image. The host sends the
++//! command over the startup control pipe as one [`Frame`]; the supervisor then
++//! runs the same `runc::exec` a forked one runs, so the startup gate, the
++//! status pipe and the host's pinning of the inner process are unchanged.
++//!
++//! Assumes the image's `main` calls [`supervise`] first, and that host and
++//! image were built from the same hakoniwa: every frame carries this build's
++//! [`SUPERVISOR_FINGERPRINT`] (its sources and features, from `build.rs`), and
++//! a supervisor from another build refuses the run with a reason, through the
++//! status pipe as any setup failure, rather than read a layout it may not
++//! share. A body it does not read to its last byte is refused too.
++//!
++//! Gotcha: the supervisor finds its control reader at descriptor 3 and its
++//! status writer at 4. Every source descriptor is first moved above
++//! [`SPARE_FD`], so that placing one never overwrites another still to place.
++
++use std::ffi::CString;
++use std::io::{PipeReader, PipeWriter, Read};
++use std::mem::MaybeUninit;
++use std::os::fd::{FromRawFd, OwnedFd, RawFd};
++use std::os::unix::ffi::OsStrExt;
++use std::path::{Path, PathBuf};
++use std::ptr;
++
++use nix::fcntl::{FcntlArg, fcntl};
++use nix::unistd::Pid;
++
++use crate::{Command, error::*};
++
++/// How [`Command::spawn`](crate::Command::spawn) starts a command's supervisor.
++#[derive(Clone, Debug)]
++pub enum Supervisor {
++    /// Fork the calling process, as upstream hakoniwa does. The supervisor
++    /// keeps a copy-on-write image of the caller for the whole run.
++    Fork,
++    /// Start this program, whose `main` calls [`supervise`] first. The
++    /// supervisor holds only its own image.
++    Image(PathBuf),
++}
++
++/// The frame header's layout.
++const FRAME_VERSION: u16 = 2;
++
++/// This build's fingerprint, which every frame carries: a hash of hakoniwa's
++/// sources and enabled features, so only a supervisor of the same build reads
++/// a host's frames.
++pub const SUPERVISOR_FINGERPRINT: &str = env!("HAKONIWA_FRAME_FINGERPRINT");
++
++/// What every reason a supervisor refuses a run for begins with. Hosts of
++/// other builds match on it, so its text never changes.
++pub const SUPERVISOR_REFUSAL: &str = "the sandbox supervisor refused the run";
++
++/// The header's length: magic, version, fingerprint, body length.
++const HEADER_LEN: usize = 4 + 2 + SUPERVISOR_FINGERPRINT.len() + 4;
++
++/// What opens every frame, so another program's bytes are refused by name.
++const FRAME_MAGIC: [u8; 4] = *b"HKSV";
++
++/// The most a frame body may claim, against a corrupt length.
++const FRAME_LIMIT: u32 = 16 << 20;
++
++/// Where a supervisor finds its startup control reader.
++const CONTROL_FD: RawFd = 3;
++
++/// Where a supervisor finds its status writer.
++const STATUS_FD: RawFd = 4;
++
++/// The lowest descriptor a source is moved to before placement.
++const SPARE_FD: RawFd = 10;
++
++/// What a supervisor needs of a command: everything `runc::exec` reads of it,
++/// sent as one frame on the startup control pipe.
++#[derive(serde::Serialize, serde::Deserialize)]
++pub(crate) struct Frame {
++    pub(crate) container: crate::Container,
++    pub(crate) program: String,
++    pub(crate) args: Vec<String>,
++    pub(crate) envs: std::collections::HashMap<String, String>,
++    pub(crate) dir: Option<PathBuf>,
++    pub(crate) wait_timeout: Option<u64>,
++    pub(crate) runtime_mount_oldproc: String,
++    pub(crate) runtime_rootdir_abspath: PathBuf,
++}
++
++impl Frame {
++    /// The frame as written: its magic, version, this build's fingerprint and
++    /// body length, then the postcard body.
++    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
++        let body = postcard::to_allocvec(self).map_err(|e| io_error(&e.to_string()))?;
++        let len = u32::try_from(body.len())
++            .ok()
++            .filter(|len| *len <= FRAME_LIMIT)
++            .ok_or_else(|| io_error("the supervisor frame is too large"))?;
++
++        Ok([
++            &FRAME_MAGIC[..],
++            &FRAME_VERSION.to_le_bytes(),
++            SUPERVISOR_FINGERPRINT.as_bytes(),
++            &len.to_le_bytes(),
++            &body,
++        ]
++        .concat())
++    }
++
++    /// Reads one frame from `control`, and no byte past it: the startup
++    /// protocol continues on the same pipe. Another program's bytes, another
++    /// header layout, another build's frame, a pipe that ends early, or a body
++    /// that does not read to its last byte are refused with why.
++    fn read(control: &mut PipeReader) -> std::result::Result<Self, String> {
++        let mut head = [0; HEADER_LEN];
++        control
++            .read_exact(&mut head)
++            .map_err(|e| format!("no supervisor frame from the host: {e}"))?;
++        let (magic, rest) = head.split_at(4);
++        let (version, rest) = rest.split_at(2);
++        let (fingerprint, len) = rest.split_at(SUPERVISOR_FINGERPRINT.len());
++
++        if magic != FRAME_MAGIC {
++            return Err("the host did not send a supervisor frame".to_owned());
++        }
++
++        let version = u16::from_le_bytes([version[0], version[1]]);
++        if version != FRAME_VERSION {
++            return Err(format!(
++                "the host wrote frame header version {version}, and this supervisor reads \
++                 version {FRAME_VERSION}: the host and its supervisor image come from different \
++                 builds; rebuild them together and restart the host"
++            ));
++        }
++
++        if fingerprint != SUPERVISOR_FINGERPRINT.as_bytes() {
++            return Err(format!(
++                "the host is build {}, and this supervisor is build {SUPERVISOR_FINGERPRINT}: the \
++                 host and its supervisor image come from different builds; rebuild them \
++                 together and restart the host",
++                String::from_utf8_lossy(fingerprint)
++            ));
++        }
++
++        let len = u32::from_le_bytes([len[0], len[1], len[2], len[3]]);
++        if len > FRAME_LIMIT {
++            return Err(format!("the supervisor frame claims {len} bytes"));
++        }
++
++        let mut body = vec![0; len as usize];
++        control
++            .read_exact(&mut body)
++            .map_err(|e| format!("the supervisor frame ended early: {e}"))?;
++        let (frame, unread) = postcard::take_from_bytes::<Self>(&body)
++            .map_err(|e| format!("the supervisor frame did not read: {e}"))?;
++        if !unread.is_empty() {
++            return Err(format!(
++                "the supervisor frame carries {} bytes this supervisor does not read",
++                unread.len()
++            ));
++        }
++
++        Ok(frame)
++    }
++}
++
++/// Starts `image` as a command's supervisor, with `stdio` (where given) at
++/// descriptors 0 to 2, `control` at 3 and `status` at 4, an empty environment,
++/// and no other argument; returns its pid.
++///
++/// Each source is first duplicated above [`SPARE_FD`] with close-on-exec, so
++/// placements never overwrite one another and the duplicates vanish at exec.
++/// A standard stream not given is inherited, as a forked supervisor inherits
++/// it. `posix_spawn` copies no page of the caller and reports a failed exec.
++pub(crate) fn spawn(
++    image: &Path,
++    stdio: [Option<RawFd>; 3],
++    control: RawFd,
++    status: RawFd,
++) -> Result<Pid> {
++    let placements = stdio
++        .into_iter()
++        .zip(0..)
++        .filter_map(|(source, target)| source.map(|source| (source, target)))
++        .chain([(control, CONTROL_FD), (status, STATUS_FD)])
++        .map(|(source, target)| spare(source).map(|spare| (spare, target)))
++        .collect::<Result<Vec<_>>>()?;
++    let program = CString::new(image.as_os_str().as_bytes())
++        .map_err(|_| io_error("the supervisor image path holds a NUL byte"))?;
++    let argv = [program.as_ptr().cast_mut(), ptr::null_mut()];
++    let envp = [ptr::null_mut::<libc::c_char>()];
++    let actions = FileActions::new()?;
++
++    for (spare, target) in &placements {
++        actions.dup2(spare, *target)?;
++    }
++
++    let mut pid: libc::pid_t = 0;
++    // SAFETY: `program`, `argv` and `envp` are NUL-terminated and outlive the
++    // call; `actions` is initialized and outlives it; a null attribute pointer
++    // asks for the defaults.
++    let spawned = unsafe {
++        libc::posix_spawn(
++            &mut pid,
++            program.as_ptr(),
++            actions.as_ptr(),
++            ptr::null(),
++            argv.as_ptr(),
++            envp.as_ptr(),
++        )
++    };
++
++    match spawned {
++        0 => Ok(Pid::from_raw(pid)),
++        errno => Err(ProcessErrorKind::StdIoError(
++            std::io::Error::from_raw_os_error(errno),
++        ))?,
++    }
++}
++
++/// A duplicate of `fd` above [`SPARE_FD`], closed at exec.
++fn spare(fd: RawFd) -> Result<OwnedFd> {
++    let spare =
++        fcntl(fd, FcntlArg::F_DUPFD_CLOEXEC(SPARE_FD)).map_err(ProcessErrorKind::NixError)?;
++    // SAFETY: fcntl just returned this descriptor, and nothing else owns it.
++    Ok(unsafe { OwnedFd::from_raw_fd(spare) })
++}
++
++/// A `posix_spawn` file-actions list, destroyed on drop.
++struct FileActions(Box<MaybeUninit<libc::posix_spawn_file_actions_t>>);
++
++impl FileActions {
++    /// An empty list.
++    fn new() -> Result<Self> {
++        let mut actions = Box::new(MaybeUninit::uninit());
++        // SAFETY: init writes the list into the storage it is given.
++        match unsafe { libc::posix_spawn_file_actions_init(actions.as_mut_ptr()) } {
++            0 => Ok(Self(actions)),
++            errno => Err(ProcessErrorKind::StdIoError(
++                std::io::Error::from_raw_os_error(errno),
++            ))?,
++        }
++    }
++
++    /// Adds: duplicate `source` onto `target` in the child.
++    fn dup2(&self, source: &OwnedFd, target: RawFd) -> Result<()> {
++        use std::os::fd::AsRawFd;
++        // SAFETY: the list was initialized in `new` and lives in its box, which
++        // never moves; libc only appends to it.
++        match unsafe {
++            libc::posix_spawn_file_actions_adddup2(
++                self.0.as_ptr().cast_mut(),
++                source.as_raw_fd(),
++                target,
++            )
++        } {
++            0 => Ok(()),
++            errno => Err(ProcessErrorKind::StdIoError(
++                std::io::Error::from_raw_os_error(errno),
++            ))?,
++        }
++    }
++
++    fn as_ptr(&self) -> *const libc::posix_spawn_file_actions_t {
++        self.0.as_ptr()
++    }
++}
++
++impl Drop for FileActions {
++    fn drop(&mut self) {
++        // SAFETY: the list was initialized in `new` and is destroyed once.
++        unsafe { libc::posix_spawn_file_actions_destroy(self.0.as_mut_ptr()) };
++    }
++}
++
++/// Runs this process as the supervisor of the command its host sends: what a
++/// [`Supervisor::Image`] program's `main` calls first. Never returns.
++///
++/// Its host started it with the startup control reader at descriptor 3 and the
++/// status writer at 4. A frame that does not read is reported as the run's
++/// failure on the status writer. Started any other way (by hand, say), it says
++/// so on stderr and exits with code 2.
++pub fn supervise() -> ! {
++    let (Some(control), Some(status)) = (inherited(CONTROL_FD), inherited(STATUS_FD)) else {
++        eprintln!("hakoniwa: a supervisor runs only when a sandbox host starts it");
++        std::process::exit(2)
++    };
++    let mut control = PipeReader::from(control);
++    let status = PipeWriter::from(status);
++
++    match Frame::read(&mut control) {
++        Ok(frame) => Command::supervise(frame, control, status),
++        Err(reason) => crate::runc::fail(status, &format!("{SUPERVISOR_REFUSAL}: {reason}")),
++    }
++}
++
++/// The descriptor `fd`, owned, when this process holds it open.
++fn inherited(fd: RawFd) -> Option<OwnedFd> {
++    fcntl(fd, FcntlArg::F_GETFD).ok().map(|_| {
++        // SAFETY: the descriptor is open, and only this function claims the
++        // two the host placed for its supervisor.
++        unsafe { OwnedFd::from_raw_fd(fd) }
++    })
++}
++
++fn io_error(reason: &str) -> Error {
++    Error::ProcessError(ProcessErrorKind::StdIoError(std::io::Error::other(
++        reason.to_owned(),
++    )))
++}
+diff --git a/src/unshare/namespace.rs b/src/unshare/namespace.rs
+index 532bfbd..5ccf16a 100644
+--- a/src/unshare/namespace.rs
++++ b/src/unshare/namespace.rs
+@@ -1,10 +1,13 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use nix::sched::CloneFlags;
+ 
+ /// Linux namespace types.
+ ///
+ /// [namespaces]: https://man7.org/linux/man-pages/man7/namespaces.7.html
+ /// [unshare]: https://man7.org/linux/man-pages/man2/unshare.2.html
+-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
++#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum Namespace {
+     Cgroup,
+     Ipc,
+diff --git a/src/unshare/newnet.rs b/src/unshare/newnet.rs
+index 3bfe315..5b7715d 100644
+--- a/src/unshare/newnet.rs
++++ b/src/unshare/newnet.rs
+@@ -1,3 +1,11 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-06.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Sets up the configured network through the host namespace owner.
++//!
++//! Assumes the selected network adapter is present and its child is unreaped.
++
+ mod network;
+ mod pasta;
+ 
+diff --git a/src/unshare/newnet/network.rs b/src/unshare/newnet/network.rs
+index bd92463..242a1d7 100644
+--- a/src/unshare/newnet/network.rs
++++ b/src/unshare/newnet/network.rs
+@@ -1,5 +1,8 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ /// Network mode.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum Network {
+     Pasta(super::Pasta),
+     #[cfg(feature = "rustslirp")]
+diff --git a/src/unshare/newnet/pasta.rs b/src/unshare/newnet/pasta.rs
+index aa373f7..e3a27ac 100644
+--- a/src/unshare/newnet/pasta.rs
++++ b/src/unshare/newnet/pasta.rs
+@@ -1,3 +1,6 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use nix::unistd::Pid;
+ use std::process::Command;
+ 
+@@ -20,7 +23,7 @@ use crate::error::*;
+ /// from host to container is configured, to disable automatic port forwarding based on bound
+ /// ports. Similarly, **-T none** and **-U none** are given to disable the same functionality
+ /// from container to host.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct Pasta {
+     pub(crate) prog: String,
+     args: Vec<String>,
+diff --git a/src/unshare/newnet/rustslirp.rs b/src/unshare/newnet/rustslirp.rs
+index 397bf53..51e969f 100644
+--- a/src/unshare/newnet/rustslirp.rs
++++ b/src/unshare/newnet/rustslirp.rs
+@@ -1,3 +1,6 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use nix::sched::{CloneFlags, setns};
+ use nix::sys::socket::{AddressFamily, SockFlag, SockType, socket};
+ use nix::unistd::{self, ForkResult, Pid};
+@@ -16,14 +19,14 @@ nix::ioctl_readwrite_bad!(set_iface_flags, libc::SIOCSIFFLAGS, libc::ifreq);
+ 
+ /// RustSlirp mode.
+ #[allow(clippy::upper_case_acronyms)]
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum RustSlirpMode {
+     TUN,
+     TAP,
+ }
+ 
+ /// Configuration for the default gateway within the network namespace.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub enum RustSlirpGateway {
+     None,
+     IfaceOnly,
+@@ -34,7 +37,7 @@ pub enum RustSlirpGateway {
+ ///
+ /// Creates a TUN/TAP device in the new NETWORK namespace, and returns the tapfd to
+ /// the caller. This allows the caller to manage packets / do filtering explicitly.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub struct RustSlirp {
+     mode: RustSlirpMode,
+     address: Ipv4Addr,
+diff --git a/src/unshare/newns/fs.rs b/src/unshare/newns/fs.rs
+index 9f11ef0..d35999f 100644
+--- a/src/unshare/newns/fs.rs
++++ b/src/unshare/newns/fs.rs
+@@ -1,22 +1,25 @@
+-#[derive(Clone, Debug)]
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub(crate) struct WriteFile {
+     pub(crate) target: String,
+     pub(crate) contents: String,
+ }
+ 
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub(crate) struct MakeDir {
+     pub(crate) target: String,
+     pub(crate) mode: u32,
+ }
+ 
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub(crate) struct MakeSymlink {
+     pub(crate) original: String,
+     pub(crate) link: String,
+ }
+ 
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub(crate) enum Operation {
+     WriteFile(WriteFile),
+     MakeDir(MakeDir),
+diff --git a/src/unshare/newns/mount.rs b/src/unshare/newns/mount.rs
+index 06d7f6d..96d280a 100644
+--- a/src/unshare/newns/mount.rs
++++ b/src/unshare/newns/mount.rs
+@@ -1,3 +1,6 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+ use nix::mount::MsFlags;
+ 
+ bitflags::bitflags! {
+@@ -16,6 +19,22 @@ bitflags::bitflags! {
+     }
+ }
+ 
++// Serialized as its bits, for a supervisor started from its own image; bits
++// this build does not know are refused rather than dropped.
++impl serde::Serialize for MountOptions {
++    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
++        serde::Serialize::serialize(&self.bits(), serializer)
++    }
++}
++
++impl<'de> serde::Deserialize<'de> for MountOptions {
++    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
++        let bits = <u32 as serde::Deserialize>::deserialize(deserializer)?;
++        Self::from_bits(bits)
++            .ok_or_else(|| serde::de::Error::custom(format!("unknown mount option bits {bits:#x}")))
++    }
++}
++
+ impl MountOptions {
+     pub(crate) fn to_ms_flags(self) -> MsFlags {
+         let mut flags = MsFlags::empty();
+@@ -34,7 +53,7 @@ impl MountOptions {
+     }
+ }
+ 
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub(crate) struct Mount {
+     pub(crate) source: String,
+     pub(crate) target: String,
+diff --git a/src/unshare/newuser/idmap.rs b/src/unshare/newuser/idmap.rs
+index 1adbead..98fef73 100644
+--- a/src/unshare/newuser/idmap.rs
++++ b/src/unshare/newuser/idmap.rs
+@@ -1,4 +1,7 @@
+-#[derive(Clone, Debug)]
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-10-27.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+ pub(crate) struct IdMap {
+     pub(crate) container_id: u32,
+     pub(crate) host_id: u32,

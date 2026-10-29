@@ -1,3 +1,11 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-06.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+//!
+//! Sets up the configured network through the host namespace owner.
+//!
+//! Assumes the selected network adapter is present and its child is unreaped.
+
 mod network;
 mod pasta;
 

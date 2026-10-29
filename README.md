@@ -1,3 +1,15 @@
+# mad-hakoniwa review candidate
+
+This local fork prepares the patched hakoniwa 1.8.0 library for a reviewed
+release. Nothing has been published or submitted. Read
+[the fork notes](hakoniwa/FORK.md) and [the qualification tools](tools/README.md).
+The inherited CLI is outside this candidate's workspace. To test the full
+Run/Sandbox chain without the fork checkout, use the
+[registry replay guide](tools/README.md). The upstream project README
+is preserved below for context.
+
+---
+
 # Hakoniwa
 
 Process isolation for Linux using namespaces, resource limits, cgroups, landlock and seccomp.

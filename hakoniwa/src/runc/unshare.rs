@@ -1,3 +1,7 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-06.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+//!
 use super::error::*;
 use super::sys::{self, FsFlags, MsFlags, PathBuf};
 use crate::{
@@ -271,8 +275,9 @@ fn apply_fs_operations(container: &Container) -> Result<()> {
 //
 // [moby#getUnprivilegedMountFlags]: https://github.com/moby/moby/blob/94d3ad69cc598b5a8eb8a643d6999375953512e8/daemon/oci_linux.go#L435
 fn unprivileged_mount_flags(path: &str, mut flags: MsFlags) -> Result<MsFlags> {
+    // A caller may strengthen a writable source to read-only. Preserve that
+    // request while inheriting flags locked by the source mount.
     for flag in [
-        MsFlags::MS_RDONLY,
         MsFlags::MS_NOSUID,
         MsFlags::MS_NODEV,
         MsFlags::MS_NOEXEC,

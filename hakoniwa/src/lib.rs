@@ -1,3 +1,7 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-28.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+//!
 //! Process isolation for Linux using namespaces, resource limits, cgroups, landlock
 //! and seccomp. It works by creating a new, completely empty, mount namespace where
 //! the root is on a tmpdir, and will be automatically cleaned up when the last
@@ -34,12 +38,13 @@ mod rlimit;
 mod runc;
 mod runctl;
 mod stdio;
+mod supervisor;
 mod unshare;
 
 use etcfs::{GroupFile, PasswdFile};
 use unshare::{FsOperation, IdMap, Mount};
 
-pub use child::{Child, ExitStatus, Output};
+pub use child::{Child, ExitStatus, Output, Termination};
 pub use command::Command;
 pub use container::Container;
 pub use error::{Error, Result};
@@ -47,6 +52,7 @@ pub use metric::{ProcPidSmapsRollup, ProcPidStatus, Rusage};
 pub use rlimit::Rlimit;
 pub use runctl::Runctl;
 pub use stdio::Stdio;
+pub use supervisor::{SUPERVISOR_FINGERPRINT, SUPERVISOR_REFUSAL, Supervisor, supervise};
 pub use unshare::{MountOptions, Namespace, Network, Pasta};
 
 #[cfg(feature = "cgroups")]
@@ -66,3 +72,5 @@ pub use unshare::RustSlirpMode;
 
 #[cfg(feature = "rustslirp")]
 pub use unshare::RustSlirpGateway;
+
+mod startup;

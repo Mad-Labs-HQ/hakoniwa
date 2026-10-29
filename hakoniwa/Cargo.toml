@@ -1,15 +1,18 @@
 [package]
-name = "hakoniwa"
-version = "1.8.0"
-description = "Process isolation for Linux using namespaces, resource limits, cgroups, landlock and seccomp."
+name = "mad-hakoniwa"
+version = "1.8.0-mad.1"
+description = "Mad Labs maintenance fork of hakoniwa with process ownership and supervisor repairs."
 keywords = ["security", "sandbox", "container", "process"]
 categories = ["security"]
-homepage = "https://github.com/souk4711/hakoniwa"
-repository = "https://github.com/souk4711/hakoniwa"
-include = ["src/**/*", "LICENSE", "../README.md"]
+build = "build.rs"
+publish = false
+include = ["build.rs", "src/**/*", "LICENSE", "COPYING", "README.md", "FORK.md", "PATCH.md", "PATCH.diff", "UPSTREAM-CHECKSUMS.json"]
 license = "LGPL-3.0-only WITH LGPL-3.0-linking-exception"
-readme = "../README.md"
+readme = "README.md"
 edition = "2024"
+
+[lib]
+name = "hakoniwa"
 
 [dependencies]
 bitflags = "2.11.1"

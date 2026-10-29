@@ -1,3 +1,11 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-06.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+//!
+//! Applies the configured Landlock rules before inner process execution.
+//!
+//! Assumes filesystem rules name accessible paths and the kernel supports them.
+
 use landlock::{
     ABI as LandlockABI, Access as LandlockAccess, AccessFs as LandlockAccessFs,
     AccessNet as LandlockAccessNet, BitFlags as LandlockBitFlags,

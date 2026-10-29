@@ -1,3 +1,6 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
@@ -5,7 +8,7 @@ use super::{FsAccess, FsRule, NetAccess, NetRule};
 
 /// Resource type.
 #[allow(non_camel_case_types)]
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Resource {
     FS,
     NET_TCP_BIND,
@@ -24,14 +27,14 @@ impl std::fmt::Display for Resource {
 }
 
 /// Compatibility mode.
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum CompatMode {
     Enforce,
     Relax,
 }
 
 /// Landlock ruleset builder.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Ruleset {
     pub(crate) restrictions: HashMap<Resource, CompatMode>,
     pub(crate) fs_rules: HashMap<String, FsRule>,

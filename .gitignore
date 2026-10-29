@@ -1,2 +1,7 @@
 /.envrc
 /target
+
+.direnv/
+/target/
+__pycache__/
+*.pyc

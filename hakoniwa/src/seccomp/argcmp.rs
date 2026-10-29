@@ -1,5 +1,8 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 /// Represents a comparison operator which can be used in an ArgCmp.
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ArgCmpOp {
     Ne,
     Lt,
@@ -11,7 +14,7 @@ pub enum ArgCmpOp {
 }
 
 /// Represents an argument comparison rule.
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ArgCmp {
     pub(crate) arg: u32,
     pub(crate) op: ArgCmpOp,
