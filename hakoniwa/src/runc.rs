@@ -1,3 +1,7 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+//!
 //! Sets up native isolation, gates the inner process, and reports its status.
 //!
 //! Assumes host setup exclusively pins the unreaped inner PID before release.
@@ -75,6 +79,18 @@ pub(crate) fn exec(
         Err(err) => ExitStatus::new_failure(&err.to_string()),
     };
 
+    finish(status, writer_opt.expect("writer is some"))
+}
+
+/// Reports `reason` as the run's failure on the status `writer`, as a
+/// supervisor that could not run its command, and exits.
+pub(crate) fn fail(writer: PipeWriter, reason: &str) -> ! {
+    finish(ExitStatus::new_failure(reason), writer)
+}
+
+/// Writes FIN and `status` on the status `writer` for the host, then exits
+/// with the status's code.
+fn finish(status: ExitStatus, mut writer: PipeWriter) -> ! {
     let encoded: Vec<u8> = match postcard::to_allocvec(&status) {
         Ok(val) => val,
         Err(_) => process_exit_with_failure!(),
@@ -82,7 +98,6 @@ pub(crate) fn exec(
 
     // Assume that the encoded message will not exceed the capacity of the pipe
     // buffer (usually 65,536 bytes), so the writer will not be blocked.
-    let mut writer = writer_opt.expect("writer is some");
     match writer.write_all(&[FIN]) {
         Ok(_) => {}
         Err(_) => process_exit_with_failure!(),

@@ -1,3 +1,6 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 use nix::mount::MsFlags;
 
 bitflags::bitflags! {
@@ -13,6 +16,22 @@ bitflags::bitflags! {
         const NOEXEC = 8;
         const BIND   = 4096;
         const REC    = 16384;
+    }
+}
+
+// Serialized as its bits, for a supervisor started from its own image; bits
+// this build does not know are refused rather than dropped.
+impl serde::Serialize for MountOptions {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.bits(), serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MountOptions {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bits = <u32 as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_bits(bits)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown mount option bits {bits:#x}")))
     }
 }
 
@@ -34,7 +53,7 @@ impl MountOptions {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Mount {
     pub(crate) source: String,
     pub(crate) target: String,

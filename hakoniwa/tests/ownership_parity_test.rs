@@ -1,10 +1,17 @@
-//! Runs the ownership regression against upstream's fork execution path.
+//! Checks cancellation and rootfs lifetime in the fork or matched image mode.
 //!
-//! The shared test body also runs against the complete local fork.
+//! Image mode requires a helper built from the same sources and feature set.
+//! The shared body uses an independent pidfd observer for cleanup.
 
 #[path = "support/ownership_parity.rs"]
 mod shared;
 
-fn configure_command(_command: &mut hakoniwa::Command) -> std::io::Result<()> {
+/// Selects a matched supervisor image when the native test driver supplies it.
+fn configure_command(command: &mut hakoniwa::Command) -> std::io::Result<()> {
+    let supervisor = match std::env::var_os("HAKONIWA_TEST_SUPERVISOR") {
+        Some(image) => hakoniwa::Supervisor::Image(image.into()),
+        None => hakoniwa::Supervisor::Fork,
+    };
+    command.supervisor(supervisor);
     Ok(())
 }

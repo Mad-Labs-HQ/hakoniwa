@@ -1,3 +1,6 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 use nix::sched::{CloneFlags, setns};
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socket};
 use nix::unistd::{self, ForkResult, Pid};
@@ -16,14 +19,14 @@ nix::ioctl_readwrite_bad!(set_iface_flags, libc::SIOCSIFFLAGS, libc::ifreq);
 
 /// RustSlirp mode.
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RustSlirpMode {
     TUN,
     TAP,
 }
 
 /// Configuration for the default gateway within the network namespace.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RustSlirpGateway {
     None,
     IfaceOnly,
@@ -34,7 +37,7 @@ pub enum RustSlirpGateway {
 ///
 /// Creates a TUN/TAP device in the new NETWORK namespace, and returns the tapfd to
 /// the caller. This allows the caller to manage packets / do filtering explicitly.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RustSlirp {
     mode: RustSlirpMode,
     address: Ipv4Addr,

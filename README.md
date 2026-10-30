@@ -107,6 +107,50 @@ fn main() {
 
 More examples can be found in [hakoniwa](https://github.com/souk4711/hakoniwa/tree/main/hakoniwa).
 
+### Executable supervisor for embedding applications
+
+By default, a command's supervisor is forked from the calling application.
+Long-lived runs can retain old host pages when that application rewrites its
+memory. An embedding application can instead select a dedicated executable:
+
+```rust,no_run
+use hakoniwa::{Container, Supervisor};
+use std::path::PathBuf;
+
+fn main() -> hakoniwa::Result<()> {
+    let helper = PathBuf::from("/path/to/supervisor");
+    let status = Container::new()
+        .rootfs("/")?
+        .command("/bin/true")
+        .supervisor(Supervisor::Image(helper))
+        .status()?;
+    assert!(status.success());
+    Ok(())
+}
+```
+
+The helper's complete entry point is:
+
+```rust,no_run
+fn main() {
+    hakoniwa::supervise();
+}
+```
+
+Build and distribute the host and helper together, using the same Hakoniwa
+sources and features. The private frame guard detects selected mismatches; it
+is not authentication or a stable cross-version protocol. The helper path
+must refer to a trusted executable. It receives its command through inherited
+startup pipes and is not intended for direct command-line use. The example
+`cargo build -p hakoniwa --example supervisor` builds that entry point.
+
+Both modes use the existing sandbox setup, Child ownership and status paths.
+No helper is needed when using the default Fork mode. Closure commands remain
+on that path; explicitly selecting Image for a closure returns an error.
+The helper launch and frame exchange are synchronous and introduce no new
+startup deadline. Applications opting in gain a fresh supervisor image at the
+cost of one more executable to package and maintain.
+
 ## How It Works
 
 ![Implementation of Command::staus](https://github.com/souk4711/hakoniwa/raw/main/architecture.svg)

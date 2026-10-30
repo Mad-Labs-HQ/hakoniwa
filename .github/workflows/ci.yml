@@ -109,6 +109,24 @@ jobs:
       - name: Test library documentation examples
         run: |
           timeout 5m cargo test --locked --all-features --doc -p hakoniwa -- --nocapture 2>&1 | tee ci-results/hakoniwa-doctests.log
+      - name: Build executable supervisor
+        run: |
+          timeout 5m cargo build --locked --all-features -p hakoniwa --example supervisor 2>&1 | tee ci-results/supervisor-build.log
+      - name: Test executable supervisor protocol and configuration
+        env:
+          HAKONIWA_TEST_SUPERVISOR: ${{ github.workspace }}/target/debug/examples/supervisor
+        run: |
+          timeout 10m cargo test --locked --all-features -p hakoniwa \
+            --test supervisor_test --test supervisor_overlay_test \
+            --test supervisor_config_test --test supervisor_protocol_test \
+            -- --ignored --nocapture 2>&1 | tee ci-results/supervisor-image.log
+      - name: Test workload ownership with executable supervisor
+        env:
+          HAKONIWA_TEST_SUPERVISOR: ${{ github.workspace }}/target/debug/examples/supervisor
+        run: |
+          timeout 5m cargo test --locked --all-features -p hakoniwa \
+            --test ownership_parity_test --test setup_reaping_test \
+            --test supervisor_status_test -- --nocapture 2>&1 | tee ci-results/supervisor-ownership.log
       - name: Test CLI with all features
         if: matrix.os == 'ubuntu-24.04'
         run: |

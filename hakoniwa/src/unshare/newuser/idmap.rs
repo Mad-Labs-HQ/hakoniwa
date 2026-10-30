@@ -1,4 +1,7 @@
-#[derive(Clone, Debug)]
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct IdMap {
     pub(crate) container_id: u32,
     pub(crate) host_id: u32,
