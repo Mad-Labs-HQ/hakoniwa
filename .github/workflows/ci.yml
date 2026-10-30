@@ -81,6 +81,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Record native execution environment
         env:
           EXPECTED_ARCH: ${{ matrix.os == 'ubuntu-24.04-arm' && 'aarch64' || 'x86_64' }}
@@ -127,6 +128,20 @@ jobs:
           timeout 5m cargo test --locked --all-features -p hakoniwa \
             --test ownership_parity_test --test setup_reaping_test \
             --test supervisor_status_test -- --nocapture 2>&1 | tee ci-results/supervisor-ownership.log
+      - name: Diagnose dependency-baseline CLI mount fixture
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          findmnt /sys | tee ci-results/baseline-sys.log
+          baseline="$RUNNER_TEMP/hakoniwa-dependency-baseline"
+          mkdir -p "$baseline"
+          git archive 521a2ba7c503563c414bcbf9428d066857af246d | tar -x -C "$baseline"
+          set +e
+          (cd "$baseline" && timeout 10m cargo test --locked --all-features --all-targets -p hakoniwa-cli -- --nocapture) 2>&1 | tee ci-results/dependency-baseline-cli.log
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "Baseline CLI exit: $result" | tee ci-results/dependency-baseline-result.log
+          test "$result" -eq 101
+          grep -q 'field-mounts.md' ci-results/dependency-baseline-cli.log
       - name: Test CLI with all features
         if: matrix.os == 'ubuntu-24.04'
         run: |
