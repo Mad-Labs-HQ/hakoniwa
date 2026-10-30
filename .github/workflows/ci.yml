@@ -140,7 +140,7 @@ jobs:
                 unset HAKONIWA_TEST_SUPERVISOR
               fi
               log="ci-results/acquisition-$mode-$errno.log"
-              timeout 2m python3 hakoniwa/tests/support/refuse_syscall.py \
+              HAKONIWA_PIDFD_REFUSAL="$errno" timeout 2m python3 hakoniwa/tests/support/refuse_syscall.py \
                 pidfd_open "$errno" "$binary" \
                 shared::refused_acquisition_must_reap_before_wait_returns \
                 --exact --ignored --nocapture 2>&1 | tee "$log"
