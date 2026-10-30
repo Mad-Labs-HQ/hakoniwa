@@ -1,3 +1,6 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 use std::collections::HashSet;
 
 use super::{Action, Arch, ArgCmp, Rule};
@@ -5,7 +8,7 @@ use super::{Action, Arch, ArgCmp, Rule};
 /// Represents a filter that allows one to configure actions to take on matched
 /// syscalls and furthermore also allows matching on values passed as
 /// arguments to syscalls.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Filter {
     pub(crate) default_action: Action,
     pub(crate) architectures: HashSet<Arch>,

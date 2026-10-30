@@ -1,5 +1,8 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 /// Manipulates various aspects of the behavior of the container.
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Runctl {
     /// Allow the internal process to gain more privileges than its parent
     /// process. Aka do not set the no_new_privs bit.

@@ -1,16 +1,26 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-28.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+//!
 //! Builds native processes and accepts their gated startup identities.
 //!
 //! Assumes exclusive child reaping. Setup failures remain owned until wait.
+//! The supervisor is a fork of the caller, or a program started from its own
+//! image ([`Supervisor`]); either way it is the caller's direct child, and the
+//! startup pipes it is given are the same.
 
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::{self, ForkResult, Pid};
 use std::collections::HashMap;
 use std::fs;
 use std::io::prelude::*;
 use std::io::{PipeReader, PipeWriter, pipe};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
+use crate::supervisor::{Frame, Supervisor};
 use crate::{Child, Container, ExitStatus, Namespace, Output, Stdio, error::*};
 
 /// Process builder, providing fine-grained control over how a new process
@@ -33,6 +43,7 @@ pub struct Command {
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
     pub(crate) wait_timeout: Option<u64>,
+    supervisor: Supervisor,
     pub(crate) runtime_mount_oldproc: String,
     pub(crate) runtime_rootdir_abspath: PathBuf,
     #[cfg(feature = "cgroups")]
@@ -56,6 +67,7 @@ impl Command {
             stdout: None,
             stderr: None,
             wait_timeout: None,
+            supervisor: Supervisor::Fork,
             runtime_mount_oldproc: String::new(),
             runtime_rootdir_abspath: PathBuf::new(),
             #[cfg(feature = "cgroups")]
@@ -81,6 +93,7 @@ impl Command {
             stdout: None,
             stderr: None,
             wait_timeout: None,
+            supervisor: Supervisor::Fork,
             runtime_mount_oldproc: String::new(),
             runtime_rootdir_abspath: PathBuf::new(),
             #[cfg(feature = "cgroups")]
@@ -136,6 +149,13 @@ impl Command {
     /// Sets the number of seconds to wait for the child process to terminate.
     pub fn wait_timeout(&mut self, timeout: u64) -> &mut Self {
         self.wait_timeout = Some(timeout);
+        self
+    }
+
+    /// Sets how the supervisor process is started: a fork of this process
+    /// (the default, as upstream), or a program started from its own image.
+    pub fn supervisor(&mut self, supervisor: Supervisor) -> &mut Self {
+        self.supervisor = supervisor;
         self
     }
 
@@ -225,78 +245,153 @@ impl Command {
         let mut pipe_a = pipe().map_err(ProcessErrorKind::StdIoError)?;
         let mut pipe_z = pipe().map_err(ProcessErrorKind::StdIoError)?;
 
-        match unsafe { unistd::fork() } {
-            Ok(ForkResult::Parent { child, .. }) => {
-                drop(stdin_reader);
-                drop(stdout_writer);
-                drop(stderr_writer);
-                drop(pipe_a.1);
-                drop(pipe_z.0);
-
-                let mut noleading = false;
-                let mut status = None;
-                let mut inner_pidfd = None;
-                let r = self.mainp_setup(&mut pipe_a.0, &mut pipe_z.1, child);
-                match r {
-                    Ok(crate::startup::Setup::Ready(descriptor)) => {
-                        inner_pidfd = Some(descriptor);
-                    }
-                    Ok(crate::startup::Setup::Exited) => {
-                        noleading = true;
-                    }
-                    Ok(crate::startup::Setup::Failed { descriptor, error }) => {
-                        inner_pidfd = Some(descriptor);
-                        status = Some(ExitStatus::new_failure(&error.to_string()));
-                    }
-                    // The main process setup failed due to:
-                    //
-                    //  - SetupUGidmapFailed: uid range not allowed, etc.
-                    //  - SetupNetworkFailed: command pasta not found, etc.
-                    //  - StdIoError: failed to write to pipe cuz the child process force killed by taskmgr.
-                    Err(e) => {
-                        // Closing the control writer asks the supervisor to
-                        // kill and reap its gated inner child before it exits.
-                        status = Some(ExitStatus::new_failure(&e.to_string()));
-                    }
-                };
-
-                drop(pipe_z.1);
-                Ok(Child::new(
-                    child,
-                    inner_pidfd,
-                    stdin_writer.and_then(|e| e.into_pipe_writer()),
-                    stdout_reader.and_then(|e| e.into_pipe_reader()),
-                    stderr_reader.and_then(|e| e.into_pipe_reader()),
-                    pipe_a.0,
-                    noleading,
-                    status,
-                    tmpdir,
-                    #[cfg(feature = "cgroups")]
-                    self.runtime_cgroup.take(),
-                    #[cfg(feature = "rustslirp")]
-                    self.runtime_rustslirp_tapfd.take(),
-                ))
+        let (child, frame) = match &self.supervisor {
+            Supervisor::Fork => match unsafe { unistd::fork() } {
+                Ok(ForkResult::Parent { child, .. }) => (child, None),
+                Ok(ForkResult::Child) => {
+                    tmpdir.map(|dir| dir.keep());
+                    drop(stdin_writer);
+                    drop(stdout_reader);
+                    drop(stderr_reader);
+                    drop(pipe_a.0);
+                    drop(pipe_z.1);
+                    crate::runc::exec(
+                        self,
+                        &self.container,
+                        stdin_reader,
+                        stdout_writer,
+                        stderr_writer,
+                        pipe_z.0,
+                        pipe_a.1,
+                    );
+                    unreachable!("Command::spawn_imp");
+                }
+                Err(err) => Err(ProcessErrorKind::NixError(err))?,
+            },
+            Supervisor::Image(image) => {
+                let frame = self.frame()?.encode()?;
+                let stdio = [
+                    stdin_reader.as_ref().map(AsRawFd::as_raw_fd),
+                    stdout_writer.as_ref().map(AsRawFd::as_raw_fd),
+                    stderr_writer.as_ref().map(AsRawFd::as_raw_fd),
+                ];
+                let child = crate::supervisor::spawn(
+                    image,
+                    stdio,
+                    pipe_z.0.as_raw_fd(),
+                    pipe_a.1.as_raw_fd(),
+                )?;
+                (child, Some(frame))
             }
-            Ok(ForkResult::Child) => {
-                tmpdir.map(|dir| dir.keep());
-                drop(stdin_writer);
-                drop(stdout_reader);
-                drop(stderr_reader);
-                drop(pipe_a.0);
-                drop(pipe_z.1);
-                crate::runc::exec(
-                    self,
-                    &self.container,
-                    stdin_reader,
-                    stdout_writer,
-                    stderr_writer,
-                    pipe_z.0,
-                    pipe_a.1,
-                );
-                unreachable!("Command::spawn_imp");
-            }
-            Err(err) => Err(ProcessErrorKind::NixError(err))?,
+        };
+
+        drop(stdin_reader);
+        drop(stdout_writer);
+        drop(stderr_writer);
+        drop(pipe_a.1);
+        drop(pipe_z.0);
+
+        // Written only once this process holds no reader of the control pipe:
+        // a supervisor that exits or refuses before taking the whole frame
+        // then breaks the write instead of blocking it forever. Killed here,
+        // it fails the setup read below; the returned child carries that
+        // failure, and its caller reaps the supervisor by a kernel wait,
+        // which a cached status does not do.
+        if let Some(frame) = frame
+            && pipe_z.1.write_all(&frame).is_err()
+        {
+            let _ = kill(child, Signal::SIGKILL);
         }
+
+        let mut noleading = false;
+        let mut status = None;
+        let mut inner_pidfd = None;
+        let r = self.mainp_setup(&mut pipe_a.0, &mut pipe_z.1, child);
+        match r {
+            Ok(crate::startup::Setup::Ready(descriptor)) => {
+                inner_pidfd = Some(descriptor);
+            }
+            Ok(crate::startup::Setup::Exited) => {
+                noleading = true;
+            }
+            Ok(crate::startup::Setup::Failed { descriptor, error }) => {
+                inner_pidfd = Some(descriptor);
+                status = Some(ExitStatus::new_failure(&error.to_string()));
+            }
+            // The main process setup failed due to:
+            //
+            //  - SetupUGidmapFailed: uid range not allowed, etc.
+            //  - SetupNetworkFailed: command pasta not found, etc.
+            //  - StdIoError: failed to write to pipe cuz the child process force killed by taskmgr.
+            Err(e) => {
+                // Closing the control writer asks the supervisor to
+                // kill and reap its gated inner child before it exits.
+                status = Some(ExitStatus::new_failure(&e.to_string()));
+            }
+        };
+
+        drop(pipe_z.1);
+        Ok(Child::new(
+            child,
+            inner_pidfd,
+            stdin_writer.and_then(|e| e.into_pipe_writer()),
+            stdout_reader.and_then(|e| e.into_pipe_reader()),
+            stderr_reader.and_then(|e| e.into_pipe_reader()),
+            pipe_a.0,
+            noleading,
+            status,
+            tmpdir,
+            #[cfg(feature = "cgroups")]
+            self.runtime_cgroup.take(),
+            #[cfg(feature = "rustslirp")]
+            self.runtime_rustslirp_tapfd.take(),
+        ))
+    }
+
+    /// What a supervisor image needs of this command, as one frame. A command
+    /// that runs a closure has none: a closure cannot leave this process.
+    fn frame(&self) -> Result<Frame> {
+        if self.program_closure.is_some() {
+            Err(ProcessErrorKind::StdIoError(std::io::Error::other(
+                "a closure command cannot run under a supervisor image",
+            )))?;
+        }
+
+        Ok(Frame {
+            container: self.container.clone(),
+            program: self.program.clone(),
+            args: self.args.clone(),
+            envs: self.envs.clone(),
+            dir: self.dir.clone(),
+            wait_timeout: self.wait_timeout,
+            runtime_mount_oldproc: self.runtime_mount_oldproc.clone(),
+            runtime_rootdir_abspath: self.runtime_rootdir_abspath.clone(),
+        })
+    }
+
+    /// Runs this process as the supervisor of the command `frame` describes,
+    /// from the startup pipes on, as a forked supervisor does: its standard
+    /// streams are already in place. Never returns.
+    pub(crate) fn supervise(frame: Frame, control: PipeReader, status: PipeWriter) -> ! {
+        let command = Self {
+            args: frame.args,
+            envs: frame.envs,
+            dir: frame.dir,
+            wait_timeout: frame.wait_timeout,
+            runtime_mount_oldproc: frame.runtime_mount_oldproc,
+            runtime_rootdir_abspath: frame.runtime_rootdir_abspath,
+            ..Self::new(&frame.program, frame.container)
+        };
+        crate::runc::exec(
+            &command,
+            &command.container,
+            None,
+            None,
+            None,
+            control,
+            status,
+        );
+        unreachable!("Command::supervise")
     }
 
     /// Logging.

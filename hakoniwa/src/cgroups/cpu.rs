@@ -1,7 +1,10 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 use super::error::*;
 
 /// Represents the cgroup subsystems cpu.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
     shares: Option<u64>,
     period: Option<u64>,

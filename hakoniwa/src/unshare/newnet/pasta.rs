@@ -1,3 +1,6 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 use nix::unistd::Pid;
 use std::process::Command;
 
@@ -20,7 +23,7 @@ use crate::error::*;
 /// from host to container is configured, to disable automatic port forwarding based on bound
 /// ports. Similarly, **-T none** and **-U none** are given to disable the same functionality
 /// from container to host.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Pasta {
     pub(crate) prog: String,
     args: Vec<String>,

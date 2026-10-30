@@ -1,7 +1,10 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-10-27.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 use super::{Action, ArgCmp};
 
 /// Represents a filter rule.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Rule {
     pub action: Action,
     pub sysname: String,
