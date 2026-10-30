@@ -2,10 +2,13 @@
 
 ## CfgMount#destination `NULL`
 
+An omitted destination keeps the source path. With `rw` omitted, the bind must
+remain read-only, even when the host mount is writable.
+
 ```console
 $ hakoniwa run --config ./tests/fixtures/config/field-mounts.toml -- findmnt /sys
 TARGET [..] OPTIONS
-/sys [..] rw,[..]
+/sys [..] ro,[..]
 
 ```
 
