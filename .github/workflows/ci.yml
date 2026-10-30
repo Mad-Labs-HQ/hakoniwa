@@ -127,6 +127,26 @@ jobs:
           timeout 5m cargo test --locked --all-features -p hakoniwa \
             --test ownership_parity_test --test setup_reaping_test \
             --test supervisor_status_test -- --nocapture 2>&1 | tee ci-results/supervisor-ownership.log
+      - name: Test refused workload-handle acquisition
+        run: |
+          cargo test --locked --all-features -p hakoniwa --test setup_reaping_test \
+            --no-run --message-format=json > ci-results/setup-reaping-build.jsonl
+          binary=$(python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; binaries=[row["executable"] for row in rows if row.get("reason")=="compiler-artifact" and row.get("executable")]; assert len(binaries)==1; print(binaries[0])' < ci-results/setup-reaping-build.jsonl)
+          for mode in fork image; do
+            for errno in 1 38; do
+              if [ "$mode" = image ]; then
+                export HAKONIWA_TEST_SUPERVISOR="$GITHUB_WORKSPACE/target/debug/examples/supervisor"
+              else
+                unset HAKONIWA_TEST_SUPERVISOR
+              fi
+              log="ci-results/acquisition-$mode-$errno.log"
+              timeout 2m python3 hakoniwa/tests/support/refuse_syscall.py \
+                pidfd_open "$errno" "$binary" \
+                shared::refused_acquisition_must_reap_before_wait_returns \
+                --exact --ignored --nocapture 2>&1 | tee "$log"
+              grep -q 'test result: ok. 1 passed; 0 failed' "$log"
+            done
+          done
       - name: Test CLI with all features
         if: matrix.os == 'ubuntu-24.04'
         run: |
