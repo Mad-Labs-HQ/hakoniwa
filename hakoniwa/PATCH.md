@@ -47,6 +47,12 @@ The host and helper must use matching source, manifest and features. Unknown
 layout, malformed input and mismatched builds are refused. Closure commands
 retain fork mode. Host applications assume exclusive reaping of these children.
 
+The supervisor file-actions wrapper uses an exclusive mutable borrow when
+libc appends descriptor actions. Its pointer comes from MaybeUninit::as_mut_ptr;
+it is never written through a pointer derived from a shared Rust reference.
+The source guard is an accidental-mismatch check, not authentication or proof
+of identical compiler, target and dependency builds.
+
 ## Upstream 1.8.0 changes retained
 
 The port keeps upstream's ptrace ESRCH continuation fix, mount-data and overlay

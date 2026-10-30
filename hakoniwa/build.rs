@@ -1,21 +1,16 @@
 //! Modification notice: Mad Labs, Inc added this file; changes recorded through
-//! 2026-10-28.
+//! 2026-10-30.
 //! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 //!
-//! Fingerprints this hakoniwa build for supervisor frames: a supervisor
-//! started from its own image refuses a frame from a host built from other
-//! sources, manifest or features, whose frame layout may differ.
+//! Fingerprints library sources, manifest and features for supervisor frames.
 //!
-//! Assumes the sources are the `.rs` files under `src/`, the manifest is
-//! `Cargo.toml`, and the features Cargo enabled are in the `CARGO_FEATURE_*`
-//! variables, as Cargo sets them for a build script. Dotfiles (an editor's
-//! lock or swap file) and other files under `src/` are not sources.
+//! Assumes Cargo exposes enabled CARGO_FEATURE_* variables and runs this script
+//! from the package root. Rust files under src include comments and test code.
+//! Dotfiles are skipped so editor artifacts cannot alter the source guard.
 //!
-//! Gotcha: the hash is FNV-1a written out here, not `std`'s hasher, so two
-//! builds of the same sources and features agree whatever compiler built
-//! them. Any source change, a comment included, changes the fingerprint; a
-//! running host and a rebuilt supervisor then refuse each other until the
-//! host restarts, which is the safe side.
+//! This FNV-1a guard is not authentication or full build identity. It excludes
+//! this script, resolved dependencies, compiler and target. Source-only edits
+//! can change it even when the frame layout stays compatible.
 
 use std::path::{Path, PathBuf};
 
