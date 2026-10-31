@@ -47,3 +47,7 @@ rustslirp = ["dep:route_manager", "dep:sendfd", "dep:tun-rs"]
 
 [package.metadata.docs.rs]
 all-features = true
+
+[[example]]
+name = "startup-exit-fixture"
+path = "tests/support/startup_exit_fixture.rs"
