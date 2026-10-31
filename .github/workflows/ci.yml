@@ -111,7 +111,15 @@ jobs:
           timeout 5m cargo test --locked --all-features --doc -p hakoniwa -- --nocapture 2>&1 | tee ci-results/hakoniwa-doctests.log
       - name: Build executable supervisor
         run: |
-          timeout 5m cargo build --locked --all-features -p hakoniwa --example supervisor 2>&1 | tee ci-results/supervisor-build.log
+          timeout 5m cargo build --locked --all-features -p hakoniwa --example supervisor --example startup-exit-fixture 2>&1 | tee ci-results/supervisor-build.log
+      - name: Test partial-frame startup cleanup
+        env:
+          HAKONIWA_TEST_EXIT_SUPERVISOR: ${{ github.workspace }}/target/debug/examples/startup-exit-fixture
+        run: |
+          timeout 1m cargo test --locked --all-features -p hakoniwa \
+            --test supervisor_startup_exit_test -- --ignored --exact \
+            partial_frame_write_failure_reaps_helper --nocapture 2>&1 | tee ci-results/supervisor-startup-exit.log
+          grep -q 'test result: ok. 1 passed; 0 failed' ci-results/supervisor-startup-exit.log
       - name: Test executable supervisor protocol and configuration
         env:
           HAKONIWA_TEST_SUPERVISOR: ${{ github.workspace }}/target/debug/examples/supervisor
