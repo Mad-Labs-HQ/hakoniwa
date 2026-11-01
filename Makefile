@@ -4,12 +4,15 @@ help:										## Print help
 
 .PHONY: lint
 lint:										## Run lint
-	cargo clippy -- -D warnings
+	cargo clippy --all-features --all-targets -- -D warnings
+	cargo fmt --all -- --check
 
 .PHONY: test
 test:										## Run test suites
 	cargo test --all-features --all-targets -p hakoniwa -- --nocapture
+	cargo test --all-features --doc -p hakoniwa -- --nocapture
 	cargo test --all-features --all-targets -p hakoniwa-cli -- --nocapture
+	cargo test --all-features --doc -p hakoniwa-cli -- --nocapture
 
 .PHONY: denycheck
 denycheck:							## Run deny check
