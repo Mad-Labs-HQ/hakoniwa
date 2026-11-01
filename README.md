@@ -1,5 +1,13 @@
 # Hakoniwa
 
+[![CI](https://github.com/Mad-Labs-HQ/hakoniwa/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Mad-Labs-HQ/hakoniwa/actions/workflows/ci.yml)
+
+This is the Mad Labs fork of [Hakoniwa](https://github.com/souk4711/hakoniwa).
+Its `main` branch is the downstream integration branch. Changes enter through
+review and CI. Mad Stack should use a qualified commit or release. Main currently
+adds CI to the upstream implementation; downstream repairs have not yet been
+promoted. See [Contributing](CONTRIBUTING.md) for branch and CI instructions.
+
 Process isolation for Linux using namespaces, resource limits, cgroups, landlock and seccomp.
 It works by creating a new, completely empty, mount namespace where the root is
 on a tmpdir, and will be automatically cleaned up when the last process exits.
