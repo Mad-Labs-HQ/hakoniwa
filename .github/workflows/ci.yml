@@ -37,6 +37,10 @@ jobs:
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: cargo-deny,cargo-hack
+      - name: Install libseccomp
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libseccomp-dev
       - name: Check dependencies and feature combinations
         run: |
           cargo deny --all-features --log-level error check

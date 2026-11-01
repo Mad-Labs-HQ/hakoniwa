@@ -39,8 +39,9 @@ Child::kill reports the inner signal result instead of a supervisor setup
 failure. Hosts and image helpers must still be rebuilt together so their source
 fingerprints match.
 
-The remount fallback retains requested read-only access while incorporating
-locked source-mount flags. Its native control also requires a writable neighbor.
+The remount fallback adopts upstream f57e321, which unions requested flags
+with locked source-mount flags. It retains read-only intent and other requested
+restrictions instead of clearing them before fallback. Its native control also requires a writable neighbor.
 
 A checked frame supports a supervisor started from its own executable image.
 The host and helper must use matching source, manifest and features. Unknown

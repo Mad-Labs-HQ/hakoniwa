@@ -1365,28 +1365,56 @@ index d54d9a6..f156ddb 100644
      ABI as LandlockABI, Access as LandlockAccess, AccessFs as LandlockAccessFs,
      AccessNet as LandlockAccessNet, BitFlags as LandlockBitFlags,
 diff --git a/src/runc/unshare.rs b/src/runc/unshare.rs
-index 132ae27..8133af2 100644
 --- a/src/runc/unshare.rs
 +++ b/src/runc/unshare.rs
 @@ -1,3 +1,7 @@
 +//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
-+//! 2026-10-06.
++//! 2026-11-01.
 +//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
 +//!
  use super::error::*;
  use super::sys::{self, FsFlags, MsFlags, PathBuf};
  use crate::{
-@@ -271,8 +275,9 @@ fn apply_fs_operations(container: &Container) -> Result<()> {
+@@ -234,7 +238,7 @@
+             }
+
+             if container.runctl.contains(&Runctl::MountFallback) {
+-                let options = unprivileged_mount_flags(target_relpath, options)?;
++                options.insert(unprivileged_mount_flags(target_relpath)?);
+                 sys::mount("", target_relpath, options)?;
+             } else {
+                 res?;
+@@ -270,19 +274,8 @@
+ // CL_UNPRIVILEGED locked flags.
  //
  // [moby#getUnprivilegedMountFlags]: https://github.com/moby/moby/blob/94d3ad69cc598b5a8eb8a643d6999375953512e8/daemon/oci_linux.go#L435
- fn unprivileged_mount_flags(path: &str, mut flags: MsFlags) -> Result<MsFlags> {
-+    // A caller may strengthen a writable source to read-only. Preserve that
-+    // request while inheriting flags locked by the source mount.
-     for flag in [
+-fn unprivileged_mount_flags(path: &str, mut flags: MsFlags) -> Result<MsFlags> {
+-    for flag in [
 -        MsFlags::MS_RDONLY,
-         MsFlags::MS_NOSUID,
-         MsFlags::MS_NODEV,
-         MsFlags::MS_NOEXEC,
+-        MsFlags::MS_NOSUID,
+-        MsFlags::MS_NODEV,
+-        MsFlags::MS_NOEXEC,
+-        MsFlags::MS_NOATIME,
+-        MsFlags::MS_NODIRATIME,
+-        MsFlags::MS_RELATIME,
+-    ] {
+-        flags.remove(flag);
+-    }
+-
++fn unprivileged_mount_flags(path: &str) -> Result<MsFlags> {
++    let mut flags = MsFlags::empty();
+     let stat = sys::statfs(path)?;
+     for flag in stat.flags() {
+         match flag {
+@@ -322,7 +315,7 @@
+
+     if !container.runctl.contains(&Runctl::RootdirRW) {
+         let mut options = MsFlags::MS_BIND | MsFlags::MS_REC | MsFlags::MS_REMOUNT;
+-        options = unprivileged_mount_flags(".", options)?;
++        options.insert(unprivileged_mount_flags(".")?);
+         options.insert(MsFlags::MS_RDONLY);
+         sys::mount("", ".", options)?;
+     }
 diff --git a/src/runc.rs b/src/runc.rs
 index 67c2f63..38da91e 100644
 --- a/src/runc.rs
