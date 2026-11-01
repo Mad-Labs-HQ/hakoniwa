@@ -31,12 +31,11 @@ ARM64. CLI tests and documentation run on x86-64. CLI execution on ARM64 is not
 qualified by this workflow. Tests run on hosted VMs, without architecture
 emulation or a dependency on a developer's shell environment.
 
-Our Landlock prerequisite test requires filesystem and TCP rights through ABI 4
-without compatibility fallback. It creates and drops a ruleset without
-restricting the test process. The container tests separately exercise denied
-operations. Their results apply to the tested kernel and environment.
-Manual runs against older source revisions execute the tests present in those
-revisions, which may lack this prerequisite assertion.
+The library's Landlock tests use strict enforcement and check both denied
+operations and success after access is granted. They run as part of the
+all-features suite on both architectures. There is no separate kernel probe.
+Results apply to the tests present in the selected source revision and the
+hosted kernel used for that run.
 
 Release and Dependabot merge automation remain disabled on this fork. A passing
 CI run does not publish a crate or release and does not qualify the Mad Stack

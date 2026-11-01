@@ -136,9 +136,6 @@ jobs:
           toolchain: stable
       - name: Record toolchain
         run: '{ rustc -Vv; cargo -V; } | tee -a ci-results/environment.log'
-      - name: Test Landlock support
-        run: |
-          timeout 5m cargo test --locked --features landlock -p hakoniwa --test landlock_test -- --nocapture 2>&1 | tee ci-results/landlock.log
       - name: Test library with all features
         run: |
           timeout 15m cargo test --locked --all-features --all-targets -p hakoniwa -- --nocapture 2>&1 | tee ci-results/hakoniwa.log
