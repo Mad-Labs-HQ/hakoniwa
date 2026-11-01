@@ -25,6 +25,10 @@ Branches based on our main inherit automatic CI on every branch push. PRs target
 our main also run CI. These can produce separate push and PR runs. There are no
 path filters, so workflow and documentation changes receive CI too.
 
+The README badge shows push-triggered CI on main. Manual runs can test other
+source revisions, so their results are separate from the badge. Its link opens
+the same main-push filter in Actions.
+
 The workflow checks dependency policy, feature combinations, formatting and
 Clippy. It tests the library and its documentation on native Linux x86-64 and
 ARM64. CLI tests and documentation run on x86-64. CLI execution on ARM64 is not

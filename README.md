@@ -1,6 +1,6 @@
 # Hakoniwa
 
-[![CI](https://github.com/Mad-Labs-HQ/hakoniwa/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Mad-Labs-HQ/hakoniwa/actions/workflows/ci.yml)
+[![Main CI](https://github.com/Mad-Labs-HQ/hakoniwa/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/Mad-Labs-HQ/hakoniwa/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 
 This is the Mad Labs fork of [Hakoniwa](https://github.com/souk4711/hakoniwa).
 Its `main` branch is the downstream integration branch. Changes enter through
