@@ -2418,3 +2418,29 @@ index 1adbead..98fef73 100644
  pub(crate) struct IdMap {
      pub(crate) container_id: u32,
      pub(crate) host_id: u32,
+diff --git a/src/runc/sys.rs b/src/runc/sys.rs
+index f4fe92c..ad76287 100644
+--- a/src/runc/sys.rs
++++ b/src/runc/sys.rs
+@@ -1,3 +1,10 @@
++//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
++//! 2026-11-19. See PATCH.md and PATCH.diff for scope and provenance.
++//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
++//!
++//! Wraps Linux isolation and process syscalls with sandbox diagnostics.
++//! Assumes callers supply valid syscall arguments and retain child ownership.
++
+ use nix::errno::Errno;
+ use nix::mount;
+ use nix::sched;
+@@ -77,8 +84,8 @@ pub(crate) fn execve<S1: AsRef<CStr> + Debug, S2: AsRef<CStr> + Debug>(
+     argv: &[S1],
+     envp: &[S2],
+ ) -> Result<()> {
+-    map_err!(unistd::execve(prog, argv, envp))?;
+-    Ok(())
++    // `execve` returns only on failure: its success value is `Infallible`.
++    match map_err!(unistd::execve(prog, argv, envp))? {}
+ }
+
+ pub(crate) fn waitpid(pid: Pid) -> Result<WaitStatus> {

@@ -1,3 +1,10 @@
+//! Modification notice: Mad Labs, Inc changed this file; changes recorded through
+//! 2026-11-19. See PATCH.md and PATCH.diff for scope and provenance.
+//! Licensed under LGPL-3.0-only WITH LGPL-3.0-linking-exception.
+//!
+//! Wraps Linux isolation and process syscalls with sandbox diagnostics.
+//! Assumes callers supply valid syscall arguments and retain child ownership.
+
 use nix::errno::Errno;
 use nix::mount;
 use nix::sched;
@@ -77,8 +84,8 @@ pub(crate) fn execve<S1: AsRef<CStr> + Debug, S2: AsRef<CStr> + Debug>(
     argv: &[S1],
     envp: &[S2],
 ) -> Result<()> {
-    map_err!(unistd::execve(prog, argv, envp))?;
-    Ok(())
+    // `execve` returns only on failure: its success value is `Infallible`.
+    match map_err!(unistd::execve(prog, argv, envp))? {}
 }
 
 pub(crate) fn waitpid(pid: Pid) -> Result<WaitStatus> {

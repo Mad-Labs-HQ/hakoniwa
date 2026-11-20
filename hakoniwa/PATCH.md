@@ -76,3 +76,18 @@ No package is published by these checks.
 The 1.7.2 vendor tree is an archived baseline. It is not the linked library or
 the current provenance reference. Upstream contributions are reviewed separately
 from this integration branch.
+
+## Vendor updates incorporated after adoption
+
+Mad Sandbox origin/main at `3feb72cd7b033825af08ef143e9a7d43a704ed40`
+adds one runtime repair after the adopted `f8d62f8` baseline. Commit
+`e1ec28bdc09268216a26a6521facbbfe32440a63` changes the execve wrapper to
+match its uninhabited success value. This avoids an unreachable-code warning
+on newer Rust compilers while preserving the original error conversion.
+Commit `4f12fd7f47096fa7cbebc49be879fc3cf5c89145` records that repair in
+the vendor patch and notices. Both are accounted for in this fork.
+
+The comparison covers the complete vendor directory. Only
+`src/runc/sys.rs`, `PATCH.diff` and `PATCH.md` changed after adoption.
+The fork retains its 1.8.0 port and subsequent lifecycle repairs. Its
+upstream checksums still describe the published 1.8.0 source.
